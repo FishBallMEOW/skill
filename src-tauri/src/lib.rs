@@ -69,7 +69,7 @@ mod autostart;
 mod tts;
 pub mod device;
 use tts::{tts_init, tts_speak, tts_unload, tts_list_voices, tts_list_neutts_voices, tts_get_voice, tts_set_voice};
-pub(crate) use tts::neutts_apply_config;
+pub(crate) use tts::{neutts_apply_config, init_tts_dirs};
 
 mod settings;
 pub(crate) use settings::{
@@ -497,6 +497,9 @@ impl Default for AppState {
             _ => default_dir,
         };
         let _ = std::fs::create_dir_all(&skill_dir);
+
+        // Register skill_dir with the TTS module before any worker thread starts.
+        init_tts_dirs(&skill_dir);
 
         let model_config    = load_model_config(&skill_dir);
         let model_status    = std::sync::Arc::new(

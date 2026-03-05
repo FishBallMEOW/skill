@@ -6192,7 +6192,9 @@ dependencies = [
 
 [[package]]
 name = "neutts"
-version = "0.0.2"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "683f2af09abe06e6bdbdfbd36963da1af8679c6fbfc26f8c44f6877acd7298c3"
 dependencies = [
  "anyhow",
  "burn",
@@ -9027,6 +9029,7 @@ dependencies = [
  "futures-util",
  "gpu-fft",
  "hf-hub 0.5.0",
+ "hound",
  "kittentts",
  "libc",
  "mdns-sd",
@@ -9041,6 +9044,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
