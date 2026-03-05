@@ -48,6 +48,13 @@ csv = "1"
 # with tracel-llvm-bundler which also links the native lzma library).
 kittentts = { version = "0.2.1", features = ["espeak"] }
 
+# NeuTTS voice-cloning TTS — GGUF backbone + NeuCodec decoder (local path).
+# backbone: GGUF LLM via llama-cpp-2 (requires cmake + C++ at build time).
+# espeak:   raw text → IPA → model (requires espeak-ng at runtime).
+# wgpu: to run models on GPU
+# fast: to optimize RoPE caching 
+neutts = { path = "../../../neutts-rs", features = ["backbone", "espeak", "fast", "wgpu"] }
+
 # Audio playback for TTS samples (pure-Rust, uses platform audio APIs)
 rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-wav"] }
 

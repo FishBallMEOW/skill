@@ -68,7 +68,8 @@ mod autostart;
 
 mod tts;
 pub mod device;
-use tts::{tts_init, tts_speak, tts_list_voices, tts_set_voice};
+use tts::{tts_init, tts_speak, tts_unload, tts_list_voices, tts_list_neutts_voices, tts_get_voice, tts_set_voice};
+pub(crate) use tts::neutts_apply_config;
 
 mod settings;
 pub(crate) use settings::{
@@ -80,6 +81,7 @@ pub(crate) use settings::{
     default_api_shortcut, default_theme_shortcut, default_focus_timer_shortcut,
     default_theme, default_daily_goal_min, default_embedding_model,
     default_ws_host, default_ws_port, default_update_check_interval, UserSettings,
+    NeuttsConfig,
 };
 
 mod tray;
@@ -143,6 +145,7 @@ use settings_cmds::{
     get_autostart_enabled, set_autostart_enabled,
     get_update_check_interval, set_update_check_interval,
     get_openbci_config, set_openbci_config, list_serial_ports,
+    get_neutts_config, set_neutts_config, pick_ref_wav_file,
 };
 
 use std::{
@@ -471,6 +474,9 @@ pub struct AppState {
     pub update_check_interval_secs: u64,
     /// OpenBCI board configuration (board type, serial port, channel labels).
     pub openbci_config: crate::settings::OpenBciConfig,
+
+    /// NeuTTS voice-cloning TTS configuration.
+    pub neutts_config: NeuttsConfig,
 }
 
 impl Default for AppState {
@@ -555,6 +561,7 @@ impl Default for AppState {
             ws_port: default_ws_port(),
             update_check_interval_secs: default_update_check_interval(),
             openbci_config: crate::settings::OpenBciConfig::default(),
+            neutts_config: NeuttsConfig::default(),
             skill_dir,
             model_config,
             model_status,
@@ -606,6 +613,7 @@ pub(crate) fn save_settings(app: &AppHandle) {
         ws_port:                s.ws_port,
         update_check_interval_secs: s.update_check_interval_secs,
         openbci:                s.openbci_config.clone(),
+        neutts:                 s.neutts_config.clone(),
     };
     let path = settings_path(&s.skill_dir);
     drop(s);
@@ -5229,6 +5237,9 @@ pub fn run() {
                 s.update_check_interval_secs = data.update_check_interval_secs;
                 // Restore OpenBCI config.
                 s.openbci_config = data.openbci;
+                // Restore NeuTTS config and sync the TTS module's statics.
+                s.neutts_config = data.neutts.clone();
+                neutts_apply_config(&data.neutts);
                 // Seed discovered list from paired
 
                 for pd in &data.paired {
@@ -5592,6 +5603,8 @@ pub fn run() {
             get_autostart_enabled, set_autostart_enabled,
             get_update_check_interval, set_update_check_interval,
             get_openbci_config, set_openbci_config, list_serial_ports,
+            get_neutts_config, set_neutts_config, pick_ref_wav_file,
+            tts_unload, tts_get_voice, tts_list_neutts_voices,
             connect_openbci,
             open_api_window,
             open_onboarding_window, complete_onboarding, get_onboarding_complete,
