@@ -9,7 +9,7 @@ the Free Software Foundation, version 3 only. -->
   import { onMount, onDestroy }       from "svelte";
   import { fade }                     from "svelte/transition";
   import { invoke }                   from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { listen, emit, type UnlistenFn } from "@tauri-apps/api/event";
   import { Card, CardContent }        from "$lib/components/ui/card";
   import TtsTestWidget                from "$lib/help/TtsTestWidget.svelte";
   import { t }                        from "$lib/i18n/index.svelte";
@@ -198,12 +198,13 @@ the Free Software Foundation, version 3 only. -->
       neuttsSaved = true;
       if (saveTimer !== null) clearTimeout(saveTimer);
       saveTimer = setTimeout(() => { neuttsSaved = false; }, 2000);
-      // Re-warm after config change
-      if (neuttsConfig.enabled) {
-        enginePhase = "loading";
-        loadStep    = 0;
-        invoke("tts_init").catch(() => {});
-      }
+      // Notify other components that the active engine may have changed.
+      await emit("tts-engine-changed", { enabled: neuttsConfig.enabled });
+      // Always re-warm so the new active engine loads immediately.
+      enginePhase = "loading";
+      loadStep    = 0;
+      loadLabel   = "";
+      invoke("tts_init").catch(() => {});
     } catch (e) {
       console.error("[NeuTTS] set_neutts_config failed", e);
     }

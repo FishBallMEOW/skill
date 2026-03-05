@@ -63,29 +63,35 @@ the Free Software Foundation, version 3 only. -->
 
   // ── Event listener ─────────────────────────────────────────────────────────
 
-  let unlistenTts: UnlistenFn | null = null;
+  let unlistenTts:       UnlistenFn | null = null;
+  let unlistenEngine:    UnlistenFn | null = null;
 
-  onMount(async () => {
-    // Determine active engine
+  /** Re-detect the active engine and refresh voice lists + ready state. */
+  async function refreshEngine() {
+    ready     = false;
+    dlStep    = 0;
+    dlLabel   = "";
     try {
       const cfg = await invoke<NeuttsConfig>("get_neutts_config");
       isNeutts = cfg.enabled;
       if (isNeutts) {
         selectedVoice = cfg.voice_preset || "";
         neuttsVoices  = await invoke<NeuttsVoice[]>("tts_list_neutts_voices");
-      }
-    } catch {}
-
-    // KittenTTS voices (fetch regardless; needed if user switches)
-    if (!isNeutts) {
-      try {
+      } else {
         const v = await invoke<string[]>("tts_list_voices");
         if (v.length) kittenVoices = v;
         const active = await invoke<string>("tts_get_voice");
-        if (active) selectedVoice = active;
-        else        selectedVoice = kittenVoices[0] ?? "Jasper";
-      } catch {}
-    }
+        selectedVoice = active || kittenVoices[0] ?? "Jasper";
+      }
+    } catch {}
+  }
+
+  onMount(async () => {
+    await refreshEngine();
+
+    unlistenEngine = await listen("tts-engine-changed", async () => {
+      await refreshEngine();
+    });
 
     unlistenTts = await listen<TtsProgress>("tts-progress", (ev) => {
       const p = ev.payload;
@@ -111,7 +117,7 @@ the Free Software Foundation, version 3 only. -->
     });
   });
 
-  onDestroy(() => { unlistenTts?.(); });
+  onDestroy(() => { unlistenTts?.(); unlistenEngine?.(); });
 
   // ── Voice helpers ──────────────────────────────────────────────────────────
 
