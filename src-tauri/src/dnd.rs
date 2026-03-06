@@ -31,6 +31,7 @@
 // For now, silently succeed so the caller's logic is unaffected on these
 // platforms.
 
+#[cfg(target_os = "macos")]
 const CLIENT_ID: &str = "com.neuroskill.app.dnd";
 
 // ── Shared types ──────────────────────────────────────────────────────────────
