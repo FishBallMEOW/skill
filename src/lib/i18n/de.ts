@@ -1877,7 +1877,17 @@ const de: Record<string, string> = {
   "dnd.focusScore":        "Engagement-Wert",
   "dnd.focusMode":         "Fokusmodus",
   "dnd.focusModeDesc":     "Der macOS-Fokusmodus, der aktiviert wird, wenn dein Engagement anhält. Wähle aus den in Systemeinstellungen → Fokus konfigurierten Modi.",
-  "dnd.focusModeLoading":  "Modi werden geladen…",
+  "dnd.focusModeLoading":       "Modi werden geladen…",
+  "dnd.exitDuration":           "Austritt-Verzögerung",
+  "dnd.exitDurationDesc":       "Wie lange der Fokus-Score unter dem Schwellenwert bleiben muss, bevor DND deaktiviert wird. Verhindert kurze Ausreißer.",
+  "dnd.exitDurationValue":      "{min} Min.",
+  "dnd.exitCountdown":          "Beendet in {secs}s",
+  "dnd.exitCountdownLong":      "Beendet in {min}m {secs}s",
+  "dnd.focusLookback":          "Fokus-Rückblick",
+  "dnd.focusLookbackDesc":      "Wenn innerhalb dieses Zeitfensters Fokus festgestellt wurde, wird der Austritts-Countdown zurückgesetzt — kürzlicher Fokus verzögert die Deaktivierung.",
+  "dnd.focusLookbackValue":     "{secs}s",
+  "dnd.focusLookbackValue_min": "{min}m",
+  "dnd.exitHeld":               "Austritt verzögert — vor {ago}s fokussiert",
 
   // ── Interactive search ───────────────────────────────────────────────────
   "search.interactiveQueryLabel":       "Suche",

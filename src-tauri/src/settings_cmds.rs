@@ -766,7 +766,9 @@ pub fn set_dnd_config(
         let mut s = state.lock_or_recover();
         let active = s.dnd_active;
         s.dnd_config          = config.clone();
-        s.dnd_focus_samples.clear(); // reset rolling window on any config change
+        s.dnd_focus_samples.clear();  // reset activation window on any config change
+        s.dnd_below_ticks     = 0;    // reset exit counter on any config change
+        s.dnd_score_history.clear();  // reset lookback history on any config change
         if !config.enabled && s.dnd_active {
             s.dnd_active = false;
         }
@@ -805,26 +807,57 @@ pub struct DndStatus {
     pub dnd_active: bool,
     /// Whether the OS reports DND / Focus as active right now (`null` on non-macOS).
     pub os_active: Option<bool>,
+    /// Seconds the score must remain below the threshold before DND clears.
+    pub exit_duration_secs: u32,
+    /// Consecutive ticks for which the score has been below threshold while
+    /// DND is active.  Used to show the exit countdown in the UI.
+    pub below_ticks: u32,
+    /// Total ticks required for the exit window (≈ exit_duration_secs × 4 Hz).
+    pub exit_window_size: usize,
+    /// Approximate seconds remaining until DND exits (0 if not counting down).
+    pub exit_secs_remaining: f64,
+    /// Lookback window in seconds: if any tick in this window was above the
+    /// threshold the exit counter resets (recent focus delays deactivation).
+    pub focus_lookback_secs: u32,
+    /// `true` when DND is active, score is below threshold, but the lookback
+    /// window still contains a focus peak so exit is being delayed.
+    pub exit_held_by_lookback: bool,
 }
 
 /// Return a snapshot of the DND automation pipeline state.
 #[tauri::command]
 pub fn get_dnd_status(state: tauri::State<'_, Mutex<AppState>>) -> DndStatus {
-    let s            = state.lock_or_recover();
-    let enabled      = s.dnd_config.enabled;
-    let threshold    = s.dnd_config.focus_threshold as f64;
-    let duration_secs = s.dnd_config.duration_secs;
-    let window_size  = (duration_secs as usize * 4).max(8);
-    let sample_count = s.dnd_focus_samples.len();
-    let avg_score    = if sample_count > 0 {
+    let s                    = state.lock_or_recover();
+    let enabled              = s.dnd_config.enabled;
+    let threshold            = s.dnd_config.focus_threshold as f64;
+    let duration_secs        = s.dnd_config.duration_secs;
+    let exit_duration_secs   = s.dnd_config.exit_duration_secs;
+    let focus_lookback_secs  = s.dnd_config.focus_lookback_secs;
+    let window_size          = (duration_secs as usize * 4).max(8);
+    let exit_window_size     = (exit_duration_secs as usize * 4).max(4);
+    let sample_count         = s.dnd_focus_samples.len();
+    let avg_score            = if sample_count > 0 {
         s.dnd_focus_samples.iter().sum::<f64>() / sample_count as f64
     } else { 0.0 };
-    let dnd_active   = s.dnd_active;
+    let dnd_active           = s.dnd_active;
+    let below_ticks          = s.dnd_below_ticks;
+    let exit_held_by_lookback = dnd_active
+        && avg_score < threshold
+        && s.dnd_score_history.iter().any(|&v| v >= threshold);
     drop(s);
+
+    let exit_secs_remaining =
+        if dnd_active && avg_score < threshold && !exit_held_by_lookback {
+            let remaining = exit_window_size.saturating_sub(below_ticks as usize);
+            remaining as f64 / 4.0
+        } else { 0.0 };
+
     DndStatus {
         enabled, avg_score, threshold, sample_count, window_size,
         duration_secs, dnd_active,
         os_active: crate::dnd::query_os_active(),
+        exit_duration_secs, below_ticks, exit_window_size, exit_secs_remaining,
+        focus_lookback_secs, exit_held_by_lookback,
     }
 }
 

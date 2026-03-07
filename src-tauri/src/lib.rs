@@ -542,8 +542,20 @@ pub struct AppState {
     /// Rolling window of raw focus scores used to compute the average for DND
     /// activation.  Capped at `duration_secs × ~4 Hz` samples.  When the
     /// average of all samples in the window exceeds `focus_threshold`, DND is
-    /// activated; when it drops below, DND is deactivated.
+    /// activated.
     pub dnd_focus_samples: std::collections::VecDeque<f64>,
+
+    /// Consecutive ~4 Hz ticks for which the focus average has been *below*
+    /// the threshold while DND is active.  Compared against
+    /// `exit_duration_secs × 4` to decide when to finally clear DND.
+    /// Reset to 0 whenever the score returns above threshold or DND is cleared.
+    pub dnd_below_ticks: u32,
+
+    /// Rolling history of raw per-tick focus scores kept for the lookback
+    /// check.  Capped at `focus_lookback_secs × ~4 Hz` samples.  When the
+    /// exit counter is running this buffer is scanned: if any entry ≥
+    /// `focus_threshold` the counter resets (recent focus delays the exit).
+    pub dnd_score_history: std::collections::VecDeque<f64>,
 }
 
 impl Default for AppState {
@@ -654,6 +666,8 @@ impl Default for AppState {
             dnd_config:          DoNotDisturbConfig::default(),
             dnd_active:          false,
             dnd_focus_samples:   std::collections::VecDeque::new(),
+            dnd_below_ticks:     0,
+            dnd_score_history:   std::collections::VecDeque::new(),
         }
     }
 }
@@ -2768,10 +2782,31 @@ async fn handle_event(
                     let avg_score = s.dnd_focus_samples.iter().sum::<f64>()
                         / sample_count as f64;
 
-                    let mut emit_active = s.dnd_active;
+                    let exit_duration_secs   = s.dnd_config.exit_duration_secs;
+                    let focus_lookback_secs  = s.dnd_config.focus_lookback_secs;
+                    // Exit window in ticks (≈4 Hz); minimum 4 ticks (1 s).
+                    let exit_window    = (exit_duration_secs  as usize * 4).max(4);
+                    // Lookback window in ticks; minimum 4 ticks (1 s).
+                    let lookback_window = (focus_lookback_secs as usize * 4).max(4);
+
+                    // ── Always maintain the per-tick score history ─────────
+                    // Push this tick's raw focus_score into the lookback ring
+                    // buffer so it is ready for exit-delay checks below.
+                    s.dnd_score_history.push_back(focus_score);
+                    while s.dnd_score_history.len() > lookback_window {
+                        s.dnd_score_history.pop_front();
+                    }
+
+                    let mut emit_active  = s.dnd_active;
+                    let mut below_ticks  = s.dnd_below_ticks;
+                    let mut exit_held    = false;   // true when lookback delays exit
 
                     if dnd_enabled {
                         if avg_score >= threshold {
+                            // Score above threshold — reset the exit counter.
+                            s.dnd_below_ticks = 0;
+                            below_ticks       = 0;
+
                             if !s.dnd_active {
                                 let mode_id = s.dnd_config.focus_mode_identifier.clone();
                                 drop(s);
@@ -2785,28 +2820,74 @@ async fn handle_event(
                                 }
                             }
                         } else if s.dnd_active {
-                            s.dnd_active = false;
-                            emit_active  = false;
-                            drop(s);
-                            dnd::set_dnd(false, "");
-                            let _ = app.emit("dnd-state-changed", false);
+                            // Score below threshold while DND is active.
+                            //
+                            // Lookback guard: if any raw tick in the last
+                            // `focus_lookback_secs` seconds was above the
+                            // threshold the user was recently focused — reset
+                            // the exit counter and delay deactivation.
+                            let recent_had_focus = s.dnd_score_history
+                                .iter()
+                                .any(|&v| v >= threshold);
+
+                            if recent_had_focus {
+                                // Recent focus → delay exit, reset counter.
+                                s.dnd_below_ticks = 0;
+                                below_ticks       = 0;
+                                exit_held         = true;
+                            } else {
+                                // No recent focus → count toward deactivation.
+                                s.dnd_below_ticks += 1;
+                                below_ticks        = s.dnd_below_ticks;
+
+                                if s.dnd_below_ticks as usize >= exit_window {
+                                    s.dnd_below_ticks = 0;
+                                    below_ticks       = 0;
+                                    s.dnd_active      = false;
+                                    emit_active       = false;
+                                    drop(s);
+                                    dnd::set_dnd(false, "");
+                                    let _ = app.emit("dnd-state-changed", false);
+                                }
+                            }
+                        } else {
+                            // Not active, score below — keep counters at 0.
+                            s.dnd_below_ticks = 0;
+                            below_ticks       = 0;
                         }
                     } else if s.dnd_active {
-                        s.dnd_active = false;
-                        emit_active  = false;
+                        // Feature disabled while DND was on — clear immediately.
+                        s.dnd_below_ticks = 0;
+                        below_ticks       = 0;
+                        s.dnd_active      = false;
+                        emit_active       = false;
                         drop(s);
                         dnd::set_dnd(false, "");
                         let _ = app.emit("dnd-state-changed", false);
                     }
 
+                    // Remaining seconds until DND exits (0 when not active
+                    // below threshold or when the lookback is holding exit).
+                    let exit_secs_remaining: f64 =
+                        if emit_active && avg_score < threshold && !exit_held {
+                            let remaining = exit_window.saturating_sub(below_ticks as usize);
+                            remaining as f64 / 4.0
+                        } else { 0.0 };
+
                     let eligibility = serde_json::json!({
-                        "enabled":      dnd_enabled,
-                        "focus_score":  focus_score,
-                        "avg_score":    avg_score,
-                        "sample_count": sample_count,
-                        "window_size":  window,
-                        "threshold":    threshold,
-                        "dnd_active":   emit_active,
+                        "enabled":                 dnd_enabled,
+                        "focus_score":             focus_score,
+                        "avg_score":               avg_score,
+                        "sample_count":            sample_count,
+                        "window_size":             window,
+                        "threshold":               threshold,
+                        "dnd_active":              emit_active,
+                        "below_ticks":             below_ticks,
+                        "exit_window_size":        exit_window,
+                        "exit_secs_remaining":     exit_secs_remaining,
+                        "exit_duration_secs":      exit_duration_secs,
+                        "exit_held_by_lookback":   exit_held,
+                        "focus_lookback_secs":     focus_lookback_secs,
                     });
                     let _ = app.emit("dnd-eligibility", &eligibility);
                     app.state::<WsBroadcaster>().send("dnd-eligibility", &eligibility);

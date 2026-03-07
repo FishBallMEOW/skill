@@ -473,6 +473,8 @@ pub(crate) fn default_track_input_activity() -> bool { true }
 
 pub(crate) fn default_dnd_threshold() -> f32 { 60.0 }
 pub(crate) fn default_dnd_duration_secs() -> u32 { 60 }
+pub(crate) fn default_dnd_exit_duration_secs() -> u32 { 300 }   // 5 minutes
+pub(crate) fn default_dnd_focus_lookback_secs() -> u32 { 60 }   // 1 minute
 pub(crate) fn default_dnd_mode_identifier() -> String {
     "com.apple.donotdisturb.mode.default".to_owned()
 }
@@ -482,7 +484,11 @@ pub(crate) fn default_dnd_mode_identifier() -> String {
 /// When `enabled`, the app monitors the real-time cognitive-load / focus score
 /// and activates macOS Do Not Disturb after the score has stayed above
 /// `focus_threshold` (0–100) for at least `duration_secs` seconds.
-/// DND is deactivated as soon as the score drops below the threshold.
+///
+/// DND is **not** deactivated immediately when the score drops — it is only
+/// cleared after the score has remained below the threshold for at least
+/// `exit_duration_secs` seconds (default 5 minutes), giving the user time to
+/// briefly lose focus without being constantly pulled out of DND.
 ///
 /// **macOS 12+ only.**  On earlier versions the legacy `defaults` approach is
 /// attempted; on non-macOS platforms the feature is a no-op.
@@ -502,6 +508,20 @@ pub struct DoNotDisturbConfig {
     #[serde(default = "default_dnd_duration_secs")]
     pub duration_secs: u32,
 
+    /// Seconds the focus score must remain *below* the threshold before DND
+    /// is cleared.  This prevents short focus dips from toggling DND off.
+    /// Range: 60–3600 s (1–60 min).  Default: 300 s (5 min).
+    #[serde(default = "default_dnd_exit_duration_secs")]
+    pub exit_duration_secs: u32,
+
+    /// Lookback window in seconds.  When DND is active and the score drops
+    /// below the threshold, the exit counter is **reset to zero** if any
+    /// raw focus tick in the last `focus_lookback_secs` seconds was above
+    /// the threshold — the user was recently focused so we delay the exit.
+    /// Default: 60 s (1 minute).  Range: 30–600 s.
+    #[serde(default = "default_dnd_focus_lookback_secs")]
+    pub focus_lookback_secs: u32,
+
     /// The macOS Focus mode to activate, stored as a `modeIdentifier` string.
     ///
     /// Defaults to `"com.apple.donotdisturb.mode.default"` (Do Not Disturb).
@@ -516,9 +536,11 @@ pub struct DoNotDisturbConfig {
 impl Default for DoNotDisturbConfig {
     fn default() -> Self {
         Self {
-            enabled:              false,
-            focus_threshold:      default_dnd_threshold(),
-            duration_secs:        default_dnd_duration_secs(),
+            enabled:               false,
+            focus_threshold:       default_dnd_threshold(),
+            duration_secs:         default_dnd_duration_secs(),
+            exit_duration_secs:    default_dnd_exit_duration_secs(),
+            focus_lookback_secs:   default_dnd_focus_lookback_secs(),
             focus_mode_identifier: default_dnd_mode_identifier(),
         }
     }

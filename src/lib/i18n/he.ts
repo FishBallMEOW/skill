@@ -1872,7 +1872,17 @@ const he: Record<string, string> = {
   "dnd.focusScore":        "ציון מעורבות",
   "dnd.focusMode":         "מצב פוקוס",
   "dnd.focusModeDesc":     "מצב הפוקוס של macOS שיופעל כשהמעורבות שלך נשמרת. בחר ממצבים שהוגדרו בהגדרות מערכת ← פוקוס.",
-  "dnd.focusModeLoading":  "טוען מצבים…",
+  "dnd.focusModeLoading":       "טוען מצבים…",
+  "dnd.exitDuration":           "השהיית יציאה מ-DND",
+  "dnd.exitDurationDesc":       "כמה זמן הציון צריך להישאר מתחת לסף לפני שה-DND מושבת. מונע שינויים תכופים.",
+  "dnd.exitDurationValue":      "{min} דקות",
+  "dnd.exitCountdown":          "יוצא בעוד {secs} שניות",
+  "dnd.exitCountdownLong":      "יוצא בעוד {min}ד׳ {secs}ש׳",
+  "dnd.focusLookback":          "חלון הסתכלות לאחור",
+  "dnd.focusLookbackDesc":      "אם זוהה פוקוס בחלון זה לפני הירידה בציון, ספירת הנסיגה מתאפסת.",
+  "dnd.focusLookbackValue":     "{secs}ש׳",
+  "dnd.focusLookbackValue_min": "{min}ד׳",
+  "dnd.exitHeld":               "יציאה נדחתה — פוקוס לפני {ago}ש׳",
 
   // ── Window titles ────────────────────────────────────────────────────────
   "window.title.main":        "{app}",

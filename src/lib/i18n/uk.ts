@@ -1871,7 +1871,17 @@ const uk: Record<string, string> = {
   "dnd.focusScore":        "Показник залученості",
   "dnd.focusMode":         "Режим фокусу",
   "dnd.focusModeDesc":     "Режим фокусу macOS, який активується, коли ваша залученість підтримується. Оберіть із режимів, налаштованих у Системних параметрах → Фокус.",
-  "dnd.focusModeLoading":  "Завантаження режимів…",
+  "dnd.focusModeLoading":       "Завантаження режимів…",
+  "dnd.exitDuration":           "Затримка виходу з DND",
+  "dnd.exitDurationDesc":       "Скільки часу оцінка повинна залишатися нижче порогу перед тим, як DND вимкнеться. Запобігає частим перемиканням.",
+  "dnd.exitDurationValue":      "{min} хв",
+  "dnd.exitCountdown":          "Вийде через {secs}с",
+  "dnd.exitCountdownLong":      "Вийде через {min}хв {secs}с",
+  "dnd.focusLookback":          "Вікно ретроспективи",
+  "dnd.focusLookbackDesc":      "Якщо фокус був зафіксований у цьому вікні до падіння оцінки, лічильник виходу скидається.",
+  "dnd.focusLookbackValue":     "{secs}с",
+  "dnd.focusLookbackValue_min": "{min}хв",
+  "dnd.exitHeld":               "Вихід затримано — фокус {ago}с тому",
 
   // ── Window titles ────────────────────────────────────────────────────────
   "window.title.main":        "{app}",

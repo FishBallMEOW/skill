@@ -21,6 +21,8 @@ the Free Software Foundation, version 3 only. -->
     enabled:               boolean;
     focus_threshold:       number;   // 0–100
     duration_secs:         number;
+    exit_duration_secs:    number;   // seconds below threshold before DND clears (default 300)
+    focus_lookback_secs:   number;   // lookback window — recent focus delays exit (default 60)
     focus_mode_identifier: string;   // modeIdentifier string, e.g. "com.apple.donotdisturb.mode.default"
   }
 
@@ -36,14 +38,36 @@ the Free Software Foundation, version 3 only. -->
     [t("dnd.durationPreset300"), 300],
   ];
 
+  // Exit delay presets: 1 / 2 / 5 / 10 / 15 / 30 / 60 minutes
+  const DND_EXIT_PRESETS: [string, number][] = [
+    [t("dnd.exitDurationValue", { min: "1"  }),   60],
+    [t("dnd.exitDurationValue", { min: "2"  }),  120],
+    [t("dnd.exitDurationValue", { min: "5"  }),  300],
+    [t("dnd.exitDurationValue", { min: "10" }),  600],
+    [t("dnd.exitDurationValue", { min: "15" }),  900],
+    [t("dnd.exitDurationValue", { min: "30" }), 1800],
+    [t("dnd.exitDurationValue", { min: "60" }), 3600],
+  ];
+
+  // Lookback presets: 30s / 1 min / 2 min / 5 min / 10 min
+  const DND_LOOKBACK_PRESETS: [string, number][] = [
+    [t("dnd.focusLookbackValue",     { secs: "30" }),  30],
+    [t("dnd.focusLookbackValue_min", { min:  "1"  }),  60],
+    [t("dnd.focusLookbackValue_min", { min:  "2"  }), 120],
+    [t("dnd.focusLookbackValue_min", { min:  "5"  }), 300],
+    [t("dnd.focusLookbackValue_min", { min:  "10" }), 600],
+  ];
+
   const DND_DEFAULT_MODE = "com.apple.donotdisturb.mode.default";
 
-  let dndConfig        = $state<DndConfig>({ enabled: false, focus_threshold: 60, duration_secs: 60, focus_mode_identifier: DND_DEFAULT_MODE });
-  let dndActive        = $state(false);
-  let dndSaving        = $state(false);
-  let dndTesting       = $state(false);
-  let focusModes       = $state<FocusModeOption[]>([]);
-  let focusModesLoaded = $state(false);
+  let dndConfig              = $state<DndConfig>({ enabled: false, focus_threshold: 60, duration_secs: 60, exit_duration_secs: 300, focus_lookback_secs: 60, focus_mode_identifier: DND_DEFAULT_MODE });
+  let dndActive              = $state(false);
+  let dndExitSecsRemain      = $state(0);    // >0 while exit countdown is running
+  let dndExitHeldByLookback  = $state(false);// true when lookback is resetting countdown
+  let dndSaving              = $state(false);
+  let dndTesting             = $state(false);
+  let focusModes             = $state<FocusModeOption[]>([]);
+  let focusModesLoaded       = $state(false);
 
   async function testDnd() {
     dndTesting = true;
@@ -69,6 +93,16 @@ the Free Software Foundation, version 3 only. -->
 
   async function setDndDuration(secs: number) {
     dndConfig = { ...dndConfig, duration_secs: secs };
+    await saveDnd();
+  }
+
+  async function setDndExitDuration(secs: number) {
+    dndConfig = { ...dndConfig, exit_duration_secs: secs };
+    await saveDnd();
+  }
+
+  async function setDndLookback(secs: number) {
+    dndConfig = { ...dndConfig, focus_lookback_secs: secs };
     await saveDnd();
   }
 
@@ -101,7 +135,20 @@ the Free Software Foundation, version 3 only. -->
     // Listen for live DND state changes (from the EEG band monitor)
     dndUnlisten = await listen<boolean>("dnd-state-changed", (ev) => {
       dndActive = ev.payload;
+      if (!ev.payload) { dndExitSecsRemain = 0; dndExitHeldByLookback = false; }
     });
+
+    // Keep the exit countdown and lookback state fresh from the ~4 Hz eligibility event
+    const eligibilityUnlisten = await listen<{
+      dnd_active:            boolean;
+      exit_secs_remaining:   number;
+      exit_held_by_lookback: boolean;
+    }>("dnd-eligibility", (ev) => {
+      dndActive             = ev.payload.dnd_active;
+      dndExitSecsRemain     = Math.ceil(ev.payload.exit_secs_remaining ?? 0);
+      dndExitHeldByLookback = ev.payload.exit_held_by_lookback ?? false;
+    });
+    dndUnlisten = () => { dndUnlisten?.(); eligibilityUnlisten(); };
   });
 
   onDestroy(() => {
@@ -166,6 +213,15 @@ the Free Software Foundation, version 3 only. -->
 
   // Goal line Y position (% from top)
   const goalY = $derived((1 - dailyGoalMin / chartMax) * 100);
+
+  // Format exit-countdown seconds → "5m 12s" style
+  function fmtExitCountdown(secs: number): string {
+    if (secs <= 0) return "";
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    if (m === 0) return t("dnd.exitCountdown", { secs: String(s) });
+    return t("dnd.exitCountdownLong", { min: String(m), secs: String(s) });
+  }
 
   // Streak: consecutive days (from today backwards) that hit the goal
   const streak = $derived.by(() => {
@@ -470,6 +526,64 @@ the Free Software Foundation, version 3 only. -->
             </div>
           </div>
 
+          <!-- ── DND Exit Delay ─────────────────────────────────────────── -->
+          <div class="flex flex-col gap-2 px-4 py-3.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[0.72rem] font-semibold text-foreground">
+                {t("dnd.exitDuration")}
+              </span>
+              <span class="text-[0.68rem] tabular-nums text-muted-foreground">
+                {t("dnd.exitDurationValue", { min: String(Math.round(dndConfig.exit_duration_secs / 60)) })}
+              </span>
+            </div>
+            <p class="text-[0.62rem] text-muted-foreground leading-relaxed -mt-0.5">
+              {t("dnd.exitDurationDesc")}
+            </p>
+            <div class="flex items-center gap-1.5 flex-wrap">
+              {#each DND_EXIT_PRESETS as [label, secs]}
+                <button
+                  onclick={() => setDndExitDuration(secs)}
+                  class="rounded-lg border px-2.5 py-1.5 text-[0.66rem] font-semibold
+                         transition-all cursor-pointer select-none
+                         {dndConfig.exit_duration_secs === secs
+                           ? 'border-violet-500/50 bg-violet-500/10 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400'
+                           : 'border-border dark:border-white/[0.08] bg-muted dark:bg-[#1a1a28] text-muted-foreground hover:text-foreground hover:bg-slate-100 dark:hover:bg-white/[0.04]'}">
+                  {label}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <!-- ── Focus Lookback ─────────────────────────────────────────── -->
+          <div class="flex flex-col gap-2 px-4 py-3.5">
+            <div class="flex items-center justify-between">
+              <span class="text-[0.72rem] font-semibold text-foreground">
+                {t("dnd.focusLookback")}
+              </span>
+              <span class="text-[0.68rem] tabular-nums text-muted-foreground">
+                {dndConfig.focus_lookback_secs >= 60
+                  ? t("dnd.focusLookbackValue_min", { min: String(Math.round(dndConfig.focus_lookback_secs / 60)) })
+                  : t("dnd.focusLookbackValue",     { secs: String(dndConfig.focus_lookback_secs) })}
+              </span>
+            </div>
+            <p class="text-[0.62rem] text-muted-foreground leading-relaxed -mt-0.5">
+              {t("dnd.focusLookbackDesc")}
+            </p>
+            <div class="flex items-center gap-1.5 flex-wrap">
+              {#each DND_LOOKBACK_PRESETS as [label, secs]}
+                <button
+                  onclick={() => setDndLookback(secs)}
+                  class="rounded-lg border px-2.5 py-1.5 text-[0.66rem] font-semibold
+                         transition-all cursor-pointer select-none
+                         {dndConfig.focus_lookback_secs === secs
+                           ? 'border-violet-500/50 bg-violet-500/10 dark:bg-violet-500/15 text-violet-600 dark:text-violet-400'
+                           : 'border-border dark:border-white/[0.08] bg-muted dark:bg-[#1a1a28] text-muted-foreground hover:text-foreground hover:bg-slate-100 dark:hover:bg-white/[0.04]'}">
+                  {label}
+                </button>
+              {/each}
+            </div>
+          </div>
+
           <!-- ── Focus mode picker ──────────────────────────────────────── -->
           {#if focusModes.length > 0}
             <div class="flex flex-col gap-2 px-4 py-3.5">
@@ -501,22 +615,52 @@ the Free Software Foundation, version 3 only. -->
           {/if}
 
           <!-- ── Active state indicator ─────────────────────────────────── -->
+          <!--
+            4 states:
+            1. violet  — DND active, score above threshold (focused)
+            2. sky     — DND active, score below threshold, lookback holding exit
+            3. amber   — DND active, score below threshold, exit countdown running
+            4. grey    — DND not active
+          -->
+          {@const isHeld      = dndActive && dndExitHeldByLookback}
+          {@const isCounting  = dndActive && !dndExitHeldByLookback && dndExitSecsRemain > 0}
+          {@const isActive    = dndActive && !dndExitHeldByLookback && dndExitSecsRemain === 0}
           <div class="flex items-center gap-3 px-4 py-3
                       bg-slate-50 dark:bg-[#111118]">
             <span class="relative flex h-2.5 w-2.5 shrink-0">
-              {#if dndActive}
+              {#if isHeld}
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-sky-500"></span>
+              {:else if isCounting}
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+              {:else if isActive}
                 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
                 <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-violet-500"></span>
               {:else}
                 <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-muted-foreground/20"></span>
               {/if}
             </span>
-            <span class="text-[0.62rem] {dndActive ? 'text-violet-600 dark:text-violet-400 font-semibold' : 'text-muted-foreground/60'}">
-              {dndActive ? t("dnd.statusActive") : t("dnd.statusInactive")}
+
+            <span class="text-[0.62rem] font-semibold
+                         {isHeld     ? 'text-sky-600 dark:text-sky-400'
+                        : isCounting ? 'text-amber-600 dark:text-amber-400'
+                        : isActive   ? 'text-violet-600 dark:text-violet-400'
+                                     : 'text-muted-foreground/60'}">
+              {#if isHeld}
+                <!-- "Exit delayed — focused recently" -->
+                {t("dnd.exitHeld", { ago: String(dndConfig.focus_lookback_secs) })}
+              {:else if isCounting}
+                {fmtExitCountdown(dndExitSecsRemain)}
+              {:else}
+                {dndActive ? t("dnd.statusActive") : t("dnd.statusInactive")}
+              {/if}
             </span>
-            <span class="ml-auto text-[0.52rem] text-muted-foreground/40">
+
+            <span class="ml-auto text-[0.52rem] text-muted-foreground/40 text-right leading-relaxed">
               {focusModes.find(m => m.identifier === dndConfig.focus_mode_identifier)?.name ?? "Do Not Disturb"}
-              · engagement ≥ {Math.round(dndConfig.focus_threshold)} for {dndConfig.duration_secs}s
+              · ≥{Math.round(dndConfig.focus_threshold)} for {dndConfig.duration_secs}s
+              · exit {Math.round(dndConfig.exit_duration_secs / 60)}m · lookback {dndConfig.focus_lookback_secs}s
             </span>
           </div>
         {/if}
