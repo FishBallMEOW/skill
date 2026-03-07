@@ -34,7 +34,7 @@ the Free Software Foundation, version 3 only. -->
     SPEC_CMAP_STOPS_DARK, SPEC_CMAP_STOPS_LIGHT,
     SPEC_LOG_INIT, SPEC_LOG_DECAY as LOG_DECAY,
     SPEC_LOG_RANGE as LOG_RANGE, SPEC_LOG_FLOOR as LOG_FLOOR,
-    DC_BETA, SMOOTH_K, WP_TAU_MS as WP_TAU,
+    DC_BETA, WP_TAU_MS as WP_TAU,
   } from "$lib/constants";
   import { getResolved } from "$lib/theme-store.svelte";
 
@@ -76,8 +76,15 @@ the Free Software Foundation, version 3 only. -->
   const writePos = new Int32Array(N_CH);
 
   // Per-channel one-pole high-pass (DC blocker, τ ≈ 780 ms @ 256 Hz).
-  // DC_BETA is imported from constants.ts.
   const dcEma = new Float64Array(N_CH);
+
+  // ── Decimation output buffers (pre-allocated, reused every frame) ─────────
+  // Sized to a generous max canvas width so no allocation happens in RAF.
+  // Stores per-pixel-column { min, max, mean } after decimate() runs.
+  const MAX_CANVAS_W = 2048;
+  const decMins  = Array.from({ length: N_CH }, () => new Float32Array(MAX_CANVAS_W));
+  const decMaxs  = Array.from({ length: N_CH }, () => new Float32Array(MAX_CANVAS_W));
+  const decMeans = Array.from({ length: N_CH }, () => new Float32Array(MAX_CANVAS_W));
 
   // ── Spectrogram state ────────────────────────────────────────────────────────
   // Four off-screen tape canvases: each is SPEC_COLS × SPEC_N_FREQ px.
@@ -129,7 +136,8 @@ the Free Software Foundation, version 3 only. -->
 
   /** Add a vertical event marker at the current write position. */
   export function pushMarker(m: EventMarker): void {
-    const pos = Math.min(...Array.from(writePos)); // use the slowest channel
+    let pos = writePos[0];
+    for (let i = 1; i < N_CH; i++) if (writePos[i] < pos) pos = writePos[i];
     markers.push({ samplePos: pos, label: m.label, color: m.color });
     if (markers.length > MAX_MARKERS) markers.shift();
   }
@@ -198,36 +206,91 @@ the Free Software Foundation, version 3 only. -->
     }
   }
 
-  // ── Buffer read (chronological, oldest → newest) ────────────────────────────
-  function readBufferAt(ch: number, endPos: number): Float64Array {
-    const buf = buffers[ch];
-    const end = Math.floor(endPos);
-    const out = new Float64Array(BUF_SIZE);
-    for (let i = 0; i < BUF_SIZE; i++) {
-      const p = end - BUF_SIZE + 1 + i;
-      out[i] = buf[((p % BUF_SIZE) + BUF_SIZE) % BUF_SIZE];
-    }
-    return out;
-  }
+  // ── Min-max decimation (replaces readBufferAt + smooth) ─────────────────────
+  //
+  // For each pixel column 0..W, scan the corresponding sample range from the
+  // ring buffer and accumulate min, max, and mean into the pre-allocated
+  // output arrays.  One pass over BUF_SIZE samples, O(W) path operations.
+  //
+  // This is equivalent to the classic oscilloscope "peak-detect" mode:
+  // visually it preserves transient peaks even at high decimation ratios and
+  // eliminates aliasing artifacts that appear when sub-sampling a full-rate
+  // polyline.  The mean is used as the centerline stroke; min/max fill the
+  // envelope band below it.
+  function decimate(ch: number, endPos: number, W: number): void {
+    const buf  = buffers[ch];
+    const end  = Math.floor(endPos);
+    const mins  = decMins[ch];
+    const maxs  = decMaxs[ch];
+    const means = decMeans[ch];
 
-  // ── Centred moving average (fixed: odd K, correct window init) ──────────────
-  // SMOOTH_K = 9 → half = 4 → window [i-4 .. i+4]; imported from constants.ts.
-  function smooth(buf: Float64Array): Float64Array {
-    const out  = new Float64Array(buf.length);
-    const half = (SMOOTH_K - 1) >> 1;   // 4
-    let   sum  = 0;
-    for (let j = -half; j <= half; j++) sum += buf[Math.max(0, j)];
-    for (let i = 0; i < buf.length; i++) {
-      out[i] = sum / SMOOTH_K;
-      sum   += buf[Math.min(buf.length - 1, i + half + 1)]
-             - buf[Math.max(0, i - half)];
+    const scale = BUF_SIZE / W;      // samples per pixel column
+
+    for (let px = 0; px < W; px++) {
+      const iStart = Math.floor(px * scale);
+      const iEnd   = Math.min(Math.floor((px + 1) * scale), BUF_SIZE);
+      let mn = Infinity, mx = -Infinity, sum = 0;
+      const cnt = iEnd - iStart;
+      for (let i = iStart; i < iEnd; i++) {
+        const p = end - BUF_SIZE + 1 + i;
+        const v = buf[((p % BUF_SIZE) + BUF_SIZE) % BUF_SIZE];
+        if (v < mn) mn = v;
+        if (v > mx) mx = v;
+        sum += v;
+      }
+      mins[px]  = cnt > 0 && mn !== Infinity  ? mn       : 0;
+      maxs[px]  = cnt > 0 && mx !== -Infinity ? mx       : 0;
+      means[px] = cnt > 0                     ? sum / cnt : 0;
     }
-    return out;
   }
 
   // ── EWMA write-head tracking ────────────────────────────────────────────────
   // Single-force EWMA: low-pass the write head, pin displayPos to it.
   // WP_TAU (ms) imported from constants.ts — smoothing τ ≫ 48 ms Muse bursts.
+
+  // ── Cached CSS theme values ──────────────────────────────────────────────
+  // Read once per theme change (MutationObserver on <html>), not every frame.
+  interface ThemeCache {
+    isDark: boolean;
+    cBg: string; cBgStrip: string; cGrid: string; cBase: string; cLabel: string;
+    chColors: string[];
+    version: number;
+  }
+  let themeCache: ThemeCache = {
+    isDark: true,
+    cBg: "#0d0d1a", cBgStrip: "#111120", cGrid: "rgba(255,255,255,0.07)",
+    cBase: "rgba(255,255,255,0.12)", cLabel: "rgba(255,255,255,0.4)",
+    chColors: [...EEG_COLOR],
+    version: 0,
+  };
+  let themeVersion = 0;   // bumped by MutationObserver
+  let frameThemeVersion = -1; // last version baked into themeCache
+
+  function refreshThemeCache(canvas: HTMLCanvasElement) {
+    const cs = getComputedStyle(canvas);
+    themeCache = {
+      isDark:    getResolved() === "dark",
+      cBg:       cs.getPropertyValue("--chart-bg").trim()        || "#0d0d1a",
+      cBgStrip:  cs.getPropertyValue("--chart-bg-strip").trim()  || "#111120",
+      cGrid:     cs.getPropertyValue("--chart-grid").trim()       || "rgba(255,255,255,0.07)",
+      cBase:     cs.getPropertyValue("--chart-baseline").trim()   || "rgba(255,255,255,0.12)",
+      cLabel:    cs.getPropertyValue("--chart-label").trim()      || "rgba(255,255,255,0.4)",
+      chColors: [
+        cs.getPropertyValue("--ch-color-0").trim() || EEG_COLOR[0],
+        cs.getPropertyValue("--ch-color-1").trim() || EEG_COLOR[1],
+        cs.getPropertyValue("--ch-color-2").trim() || EEG_COLOR[2],
+        cs.getPropertyValue("--ch-color-3").trim() || EEG_COLOR[3],
+      ],
+      version: themeVersion,
+    };
+    frameThemeVersion = themeVersion;
+  }
+
+  // ── Dirty-skip state ─────────────────────────────────────────────────────
+  // When the display position hasn't moved and no new spec column arrived,
+  // skip the expensive canvas work and just reschedule RAF.
+  let lastDisplayPos = -Infinity;
+  let lastSpecColRendered = -1;
 
   // ── Canvas + ResizeObserver ─────────────────────────────────────────────────
   let canvasEl!: HTMLCanvasElement;
@@ -235,6 +298,7 @@ the Free Software Foundation, version 3 only. -->
   let animFrame: number | undefined;
   let rendering = false;
   let ro: ResizeObserver | undefined;
+  let mo: MutationObserver | undefined;
 
   /** Restart the render loop if it was stopped (e.g. after wake-from-sleep). */
   export function restartRender(): void {
@@ -245,12 +309,14 @@ the Free Software Foundation, version 3 only. -->
     if (rendering) return;
     rendering = true;
 
-    let ewmaWp       = Math.min(...Array.from(writePos));
+    let minWpInit = writePos[0];
+    for (let i = 1; i < N_CH; i++) if (writePos[i] < minWpInit) minWpInit = writePos[i];
+    let ewmaWp = minWpInit;
     let lastFrameNow = -1;
 
     function frame(now: DOMHighResTimeStamp) {
       if (!rendering) return;
-      // Schedule the next frame FIRST so a drawing exception can never kill the loop.
+      // Schedule next frame FIRST so a drawing exception can never kill the loop.
       animFrame = requestAnimationFrame(frame);
 
       try {
@@ -268,27 +334,27 @@ the Free Software Foundation, version 3 only. -->
       // ── EWMA write head ──────────────────────────────────────────────────
       const dt    = lastFrameNow < 0 ? 0 : now - lastFrameNow;
       lastFrameNow = now;
-      const minWp = Math.min(...Array.from(writePos));
+      // Avoid Array.from + spread — iterate Int32Array directly.
+      let minWp = writePos[0];
+      for (let i = 1; i < N_CH; i++) if (writePos[i] < minWp) minWp = writePos[i];
       ewmaWp     += (minWp - ewmaWp) * (1 - Math.exp(-dt / WP_TAU));
       let displayPos = ewmaWp;
       if (displayPos < minWp - BUF_SIZE) displayPos = minWp - BUF_SIZE;
 
-      // ── Theme tokens (read from CSS each frame — switches instantly on OS change)
-      const isDark   = getResolved() === "dark";
-      const cs       = getComputedStyle(canvasEl);
-      const cBg      = cs.getPropertyValue("--chart-bg").trim();
-      const cBgStrip = cs.getPropertyValue("--chart-bg-strip").trim();
-      const cGrid    = cs.getPropertyValue("--chart-grid").trim();
-      const cBase    = cs.getPropertyValue("--chart-baseline").trim();
-      const cLabel   = cs.getPropertyValue("--chart-label").trim();
+      // ── Dirty-skip ───────────────────────────────────────────────────────
+      // If the display position has moved less than half a CSS pixel AND no
+      // new spectrogram column has arrived, the canvas output would be
+      // pixel-identical to the previous frame — skip all drawing work.
+      const posDelta = Math.abs(displayPos - lastDisplayPos);
+      if (posDelta < 0.5 && specWriteCol === lastSpecColRendered && frameThemeVersion === themeVersion) {
+        return; // RAF already rescheduled above
+      }
+      lastDisplayPos      = displayPos;
+      lastSpecColRendered = specWriteCol;
 
-      // Per-channel colors (overridable via chart color scheme)
-      const chColors = [
-        cs.getPropertyValue("--ch-color-0").trim() || EEG_COLOR[0],
-        cs.getPropertyValue("--ch-color-1").trim() || EEG_COLOR[1],
-        cs.getPropertyValue("--ch-color-2").trim() || EEG_COLOR[2],
-        cs.getPropertyValue("--ch-color-3").trim() || EEG_COLOR[3],
-      ];
+      // ── Theme cache (read CSS only when theme changed) ───────────────────
+      if (frameThemeVersion !== themeVersion) refreshThemeCache(canvasEl);
+      const { isDark, cBg, cBgStrip, cGrid, cBase, cLabel, chColors } = themeCache;
 
       // ── Background ───────────────────────────────────────────────────────
       ctx.fillStyle = cBg;
@@ -429,8 +495,20 @@ the Free Software Foundation, version 3 only. -->
         ctx.fillStyle = chColors[ch];
         ctx.fillText(EEG_CH[ch], 6, y0 + 13);
 
-        // ── Waveform path, clipped to this row ───────────────────────────
-        const buf = smooth(readBufferAt(ch, displayPos));
+        // ── Waveform — min-max decimation (O(W) path ops, no allocations) ──
+        //
+        // decimate() makes one pass over BUF_SIZE ring-buffer samples and
+        // stores per-pixel-column {min, max, mean} into pre-allocated arrays.
+        // We then build:
+        //   envPath  — closed min-max band (filled at low alpha = envelope)
+        //   mainPath — mean centerline (stroked = the waveform line)
+        //
+        // Total lineTo calls: 2 × W ≈ 1 760 instead of BUF_SIZE = 3 840.
+        decimate(ch, displayPos, W);
+        const mins  = decMins[ch];
+        const maxs  = decMaxs[ch];
+        const means = decMeans[ch];
+        const scale = ROW_H / 2 - PAD;
 
         ctx.save();
         ctx.beginPath();
@@ -438,72 +516,64 @@ the Free Software Foundation, version 3 only. -->
         ctx.clip();
 
         ctx.lineJoin = "round";
-        ctx.lineCap  = "round";
+        ctx.lineCap  = "butt";   // butt is cheaper than round for long lines
 
-        // Build the waveform path once — store endpoints for live dot
-        let lastX = 0, lastY = mid;
-        const path = new Path2D();
-        for (let i = 0; i < BUF_SIZE; i++) {
-          const x = (i / (BUF_SIZE - 1)) * W;
-          const y = mid - (buf[i] / EEG_RANGE) * (ROW_H / 2 - PAD);
-          i === 0 ? path.moveTo(x, y) : path.lineTo(x, y);
-          lastX = x; lastY = y;
+        // Build the closed min-max envelope path (top edge forward, bottom back).
+        const envPath = new Path2D();
+        envPath.moveTo(0, mid - (maxs[0] / EEG_RANGE) * scale);
+        for (let px = 1; px < W; px++) {
+          envPath.lineTo(px, mid - (maxs[px] / EEG_RANGE) * scale);
         }
+        for (let px = W - 1; px >= 0; px--) {
+          envPath.lineTo(px, mid - (mins[px] / EEG_RANGE) * scale);
+        }
+        envPath.closePath();
 
-        // ── Gradient fill under curve (only in dark mode — too heavy on light spec) ──
+        // Build the mean centerline path.
+        const mainPath = new Path2D();
+        mainPath.moveTo(0, mid - (means[0] / EEG_RANGE) * scale);
+        for (let px = 1; px < W; px++) {
+          mainPath.lineTo(px, mid - (means[px] / EEG_RANGE) * scale);
+        }
+        const lastY = mid - (means[W - 1] / EEG_RANGE) * scale;
+
+        // ── Envelope fill (min-max band at low alpha) ──────────────────────
+        ctx.fillStyle   = chColors[ch];
+        ctx.globalAlpha = isDark ? 0.10 : 0.08;
+        ctx.fill(envPath);
+        ctx.globalAlpha = 1;
+
+        // ── Glow layer (dark mode only — wider semi-transparent stroke) ─────
         if (isDark) {
-          const fillGrad = ctx.createLinearGradient(0, y0, 0, y0 + ROW_H);
-          const chColor = chColors[ch] || "#3b82f6";
-          // Convert chColor to rgba for gradient stops — parse hex or use fallback
-          fillGrad.addColorStop(0, chColor.replace(/^#/, '') .length === 6
-            ? `rgba(${parseInt(chColor.slice(1,3),16)},${parseInt(chColor.slice(3,5),16)},${parseInt(chColor.slice(5,7),16)},0.08)`
-            : `rgba(100,130,220,0.08)`);
-          fillGrad.addColorStop(0.5, "rgba(0,0,0,0)");
-          fillGrad.addColorStop(1, chColor.replace(/^#/, '') .length === 6
-            ? `rgba(${parseInt(chColor.slice(1,3),16)},${parseInt(chColor.slice(3,5),16)},${parseInt(chColor.slice(5,7),16)},0.06)`
-            : `rgba(100,130,220,0.06)`);
-          // Close the fill area
-          const fillPath = new Path2D(path);
-          fillPath.lineTo(W, mid);
-          fillPath.lineTo(0, mid);
-          fillPath.closePath();
-          ctx.fillStyle = fillGrad;
-          ctx.globalAlpha = 0.7;
-          ctx.fill(fillPath);
+          ctx.shadowBlur  = 5;
+          ctx.shadowColor = chColors[ch];
+          ctx.strokeStyle = chColors[ch];
+          ctx.lineWidth   = 3;
+          ctx.globalAlpha = 0.20;
+          ctx.stroke(mainPath);
+          ctx.shadowBlur  = 0;
           ctx.globalAlpha = 1;
-        }
-
-        // ── Glow layer (wider semi-transparent stroke, dark mode only) ─────
-        if (isDark) {
-          ctx.shadowBlur   = 6;
-          ctx.shadowColor  = chColors[ch] || "#3b82f6";
-          ctx.strokeStyle  = chColors[ch] || "#3b82f6";
-          ctx.lineWidth    = 3.5;
-          ctx.globalAlpha  = 0.25;
-          ctx.stroke(path);
-          ctx.shadowBlur   = 0;
-          ctx.globalAlpha  = 1;
         }
 
         // ── Light-mode contrast outline ────────────────────────────────────
         if (!isDark) {
-          ctx.strokeStyle = "rgba(0,0,0,0.45)";
-          ctx.lineWidth   = 3.5;
-          ctx.stroke(path);
+          ctx.strokeStyle = "rgba(0,0,0,0.35)";
+          ctx.lineWidth   = 3;
+          ctx.stroke(mainPath);
         }
 
         // ── Main waveform stroke ────────────────────────────────────────────
         ctx.strokeStyle = chColors[ch];
         ctx.lineWidth   = isDark ? 1.5 : 1.8;
-        ctx.stroke(path);
+        ctx.stroke(mainPath);
 
-        // ── Live-edge pulse dot (bright circle at the rightmost sample) ─────
+        // ── Live-edge pulse dot ─────────────────────────────────────────────
         if (isDark) {
           ctx.beginPath();
-          ctx.arc(lastX, lastY, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle   = chColors[ch] || "#3b82f6";
+          ctx.arc(W - 1, lastY, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle   = chColors[ch];
           ctx.shadowBlur  = 8;
-          ctx.shadowColor = chColors[ch] || "#3b82f6";
+          ctx.shadowColor = chColors[ch];
           ctx.globalAlpha = 0.9;
           ctx.fill();
           ctx.shadowBlur  = 0;
@@ -644,17 +714,32 @@ the Free Software Foundation, version 3 only. -->
       cssW = canvasEl.clientWidth;
       canvasEl.width  = Math.round(cssW    * dpr);
       canvasEl.height = Math.round(CHART_H * dpr);
+      // Force full redraw on next frame after resize.
+      lastDisplayPos = -Infinity;
     };
 
     ro = new ResizeObserver(resize);
     ro.observe(canvasEl);
     resize();
+
+    // Invalidate the CSS theme cache whenever the <html> element's class or
+    // style attribute changes (dark/light toggle, system theme switch, etc.).
+    mo = new MutationObserver(() => { themeVersion++; });
+    mo.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "style"],
+    });
+
+    // Seed the cache immediately so the first frame doesn't use defaults.
+    refreshThemeCache(canvasEl);
+
     startRender();
   });
 
   onDestroy(() => {
     stopRender();
     ro?.disconnect();
+    mo?.disconnect();
     clearTimeout(tooltipTimer);
   });
 </script>

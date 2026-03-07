@@ -112,7 +112,8 @@ impl QualityMonitor {
         (0..self.bufs.len()).map(|ch| self.classify(ch)).collect()
     }
 
-    /// Clear all rolling windows (call on session disconnect).
+    /// Clear all rolling windows, resetting every channel to `NoSignal`.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         for buf in &mut self.bufs {
             buf.clear();

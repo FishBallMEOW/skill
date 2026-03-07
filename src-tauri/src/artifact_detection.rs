@@ -93,8 +93,15 @@ impl ArtifactDetector {
         }
     }
 
+    /// Reset all state to initial values (as if `new()` had just been called).
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
-        *self = Self::new();
+        self.blink_baseline   = [20.0; 2];
+        self.blink_refractory = [0; 2];
+        self.in_blink         = [false; 2];
+        self.blink_count      = 0;
+        self.blink_times.clear();
+        self.sample_count     = 0;
     }
 
     // ── Blink detection (frontal channels) ───────────────────────────────────

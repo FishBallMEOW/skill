@@ -161,11 +161,12 @@ pub fn get_filter_config(state: tauri::State<'_, Mutex<AppState>>) -> FilterConf
 
 #[tauri::command]
 pub fn set_filter_config(config: FilterConfig, app: AppHandle) {
+    // Only write to status.filter_config.  The running SessionDsp picks up
+    // the change via SessionDsp::sync_config() at the top of its next frame
+    // (<250 ms latency), without ever holding the AppState lock during DSP.
     {
         let r = app.state::<Mutex<AppState>>();
-        let mut s = r.lock_or_recover();
-        s.status.filter_config = config;
-        s.filter.set_config(config);
+        r.lock_or_recover().status.filter_config = config;
     }
     save_settings(&app);
     emit_status(&app);
@@ -175,10 +176,7 @@ pub fn set_filter_config(config: FilterConfig, app: AppHandle) {
 pub fn set_notch_preset(preset: Option<PowerlineFreq>, app: AppHandle) {
     {
         let r = app.state::<Mutex<AppState>>();
-        let mut s = r.lock_or_recover();
-        s.status.filter_config.notch = preset;
-        let new_cfg = s.status.filter_config;
-        s.filter.set_config(new_cfg);
+        r.lock_or_recover().status.filter_config.notch = preset;
     }
     save_settings(&app);
     emit_status(&app);
@@ -188,7 +186,9 @@ pub fn set_notch_preset(preset: Option<PowerlineFreq>, app: AppHandle) {
 
 #[tauri::command]
 pub fn get_latest_bands(state: tauri::State<'_, Mutex<AppState>>) -> Option<BandSnapshot> {
-    state.lock_or_recover().band_analyzer.latest.clone()
+    // latest_bands is written back by the session task after each ~4 Hz
+    // computation; reading it never blocks on DSP.
+    state.lock_or_recover().latest_bands.clone()
 }
 
 // ── Embedding overlap ─────────────────────────────────────────────────────────
@@ -203,9 +203,8 @@ pub fn set_embedding_overlap(overlap_secs: f32, app: AppHandle) {
     let clamped = overlap_secs.clamp(EMBEDDING_OVERLAP_MIN_SECS, EMBEDDING_OVERLAP_MAX_SECS);
     {
         let r = app.state::<Mutex<AppState>>();
-        let mut s = r.lock_or_recover();
-        s.status.embedding_overlap_secs = clamped;
-        s.accumulator.set_overlap_secs(clamped);
+        r.lock_or_recover().status.embedding_overlap_secs = clamped;
+        // SessionDsp::sync_config() picks up the change next frame.
     }
     save_settings(&app);
     emit_status(&app);
@@ -844,6 +843,9 @@ pub fn get_dnd_status(state: tauri::State<'_, Mutex<AppState>>) -> DndStatus {
     let exit_held_by_lookback = dnd_active
         && avg_score < threshold
         && s.dnd_score_history.iter().any(|&v| v >= threshold);
+    // Use the cached OS state (refreshed every 5 s by the background poll)
+    // rather than reading the file on every UI request.
+    let os_active            = s.dnd_os_active;
     drop(s);
 
     let exit_secs_remaining =
@@ -854,8 +856,7 @@ pub fn get_dnd_status(state: tauri::State<'_, Mutex<AppState>>) -> DndStatus {
 
     DndStatus {
         enabled, avg_score, threshold, sample_count, window_size,
-        duration_secs, dnd_active,
-        os_active: crate::dnd::query_os_active(),
+        duration_secs, dnd_active, os_active,
         exit_duration_secs, below_ticks, exit_window_size, exit_secs_remaining,
         focus_lookback_secs, exit_held_by_lookback,
     }

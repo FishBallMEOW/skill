@@ -62,6 +62,7 @@ the Free Software Foundation, version 3 only. -->
 
   let dndConfig              = $state<DndConfig>({ enabled: false, focus_threshold: 60, duration_secs: 60, exit_duration_secs: 300, focus_lookback_secs: 60, focus_mode_identifier: DND_DEFAULT_MODE });
   let dndActive              = $state(false);
+  let dndOsActive            = $state<boolean | null>(null); // real system-level state
   let dndExitSecsRemain      = $state(0);    // >0 while exit countdown is running
   let dndExitHeldByLookback  = $state(false);// true when lookback is resetting countdown
   let dndSaving              = $state(false);
@@ -113,6 +114,22 @@ the Free Software Foundation, version 3 only. -->
 
   let dndUnlisten: UnlistenFn | null = null;
 
+  // Re-fetch the authoritative DND state from the backend.  Called on mount
+  // and whenever the window regains visibility (e.g. user switches back to the
+  // app after changing Focus settings in System Settings).
+  async function refreshDndState() {
+    try {
+      // get_dnd_active  → app-controlled flag
+      // get_dnd_status  → includes os_active from the 5-second OS poll cache
+      const [appActive, status] = await Promise.all([
+        invoke<boolean>("get_dnd_active"),
+        invoke<{ dnd_active: boolean; os_active: boolean | null }>("get_dnd_status"),
+      ]);
+      dndActive   = appActive;
+      dndOsActive = status.os_active ?? null;
+    } catch {}
+  }
+
   onMount(async () => {
     try {
       const v = await invoke<number>("get_daily_goal");
@@ -123,8 +140,8 @@ the Free Software Foundation, version 3 only. -->
     // Load DND config + current active state
     try {
       dndConfig = await invoke<DndConfig>("get_dnd_config");
-      dndActive = await invoke<boolean>("get_dnd_active");
     } catch {}
+    await refreshDndState();
 
     // Load available Focus modes from the OS (macOS only; empty on other platforms)
     try {
@@ -132,23 +149,45 @@ the Free Software Foundation, version 3 only. -->
     } catch {}
     focusModesLoaded = true;
 
+    // Re-sync when the user switches back to the app window after making changes
+    // in System Settings or another app that may have toggled Focus mode.
+    const onVisible = () => { if (document.visibilityState === "visible") refreshDndState(); };
+    document.addEventListener("visibilitychange", onVisible);
+
     // Listen for live DND state changes (from the EEG band monitor)
-    dndUnlisten = await listen<boolean>("dnd-state-changed", (ev) => {
+    const stateUnlisten = await listen<boolean>("dnd-state-changed", (ev) => {
       dndActive = ev.payload;
       if (!ev.payload) { dndExitSecsRemain = 0; dndExitHeldByLookback = false; }
     });
 
-    // Keep the exit countdown and lookback state fresh from the ~4 Hz eligibility event
+    // Keep the exit countdown and lookback state fresh from the ~4 Hz eligibility event.
+    // os_active is now included in the payload (read from the 5-second cache, not live file).
     const eligibilityUnlisten = await listen<{
       dnd_active:            boolean;
       exit_secs_remaining:   number;
       exit_held_by_lookback: boolean;
+      os_active:             boolean | null;
     }>("dnd-eligibility", (ev) => {
       dndActive             = ev.payload.dnd_active;
+      dndOsActive           = ev.payload.os_active ?? null;
       dndExitSecsRemain     = Math.ceil(ev.payload.exit_secs_remaining ?? 0);
       dndExitHeldByLookback = ev.payload.exit_held_by_lookback ?? false;
     });
-    dndUnlisten = () => { dndUnlisten?.(); eligibilityUnlisten(); };
+
+    // Background OS poll fires when system DND state changes externally
+    // (user toggled in System Settings, Shortcuts automation, lock screen, etc.)
+    const osChangedUnlisten = await listen<{ os_active: boolean | null }>("dnd-os-changed", (ev) => {
+      dndOsActive = ev.payload.os_active ?? null;
+      // If the OS cleared DND without the app doing it, the backend already
+      // reconciles dnd_active and emits dnd-state-changed — no extra action needed here.
+    });
+
+    dndUnlisten = () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      stateUnlisten();
+      eligibilityUnlisten();
+      osChangedUnlisten();
+    };
   });
 
   onDestroy(() => {
@@ -432,11 +471,22 @@ the Free Software Foundation, version 3 only. -->
       <span class="text-[0.56rem] font-semibold tracking-widest uppercase text-muted-foreground">
         {t("dnd.section")}
       </span>
-      <!-- Live status badge -->
+      <!-- Live status badge (app-controlled) + OS indicator -->
       {#if dndConfig.enabled}
         <span class="ml-auto text-[0.52rem] font-bold tracking-widest uppercase shrink-0
                      {dndActive ? 'text-violet-500' : 'text-muted-foreground/50'}">
           {dndActive ? t("dnd.statusActive") : t("dnd.statusInactive")}
+        </span>
+      {/if}
+      <!-- System-level OS DND badge: shown when the OS state is known and
+           either diverges from app state or there is no automation enabled. -->
+      {#if dndOsActive !== null}
+        <span class="text-[0.50rem] font-semibold tracking-wide shrink-0 px-1.5 py-0.5
+                     rounded-full border
+                     {dndOsActive
+                       ? 'border-violet-400/40 bg-violet-500/10 text-violet-600 dark:text-violet-400'
+                       : 'border-border dark:border-white/[0.06] text-muted-foreground/40'}">
+          {dndOsActive ? "System: ON" : "System: OFF"}
         </span>
       {/if}
       {#if dndSaving}
@@ -657,11 +707,28 @@ the Free Software Foundation, version 3 only. -->
               {/if}
             </span>
 
-            <span class="ml-auto text-[0.52rem] text-muted-foreground/40 text-right leading-relaxed">
-              {focusModes.find(m => m.identifier === dndConfig.focus_mode_identifier)?.name ?? "Do Not Disturb"}
-              · ≥{Math.round(dndConfig.focus_threshold)} for {dndConfig.duration_secs}s
-              · exit {Math.round(dndConfig.exit_duration_secs / 60)}m · lookback {dndConfig.focus_lookback_secs}s
-            </span>
+            <div class="ml-auto flex flex-col items-end gap-0.5">
+              <span class="text-[0.52rem] text-muted-foreground/40 text-right leading-relaxed">
+                {focusModes.find(m => m.identifier === dndConfig.focus_mode_identifier)?.name ?? "Do Not Disturb"}
+                · ≥{Math.round(dndConfig.focus_threshold)} for {dndConfig.duration_secs}s
+                · exit {Math.round(dndConfig.exit_duration_secs / 60)}m · lookback {dndConfig.focus_lookback_secs}s
+              </span>
+              <!-- OS-level DND state: updated by the 5-second background poll
+                   and on visibilitychange so it reflects external changes
+                   (System Settings, another app, lock screen, Shortcuts, etc.) -->
+              {#if dndOsActive !== null}
+                <span class="text-[0.50rem] font-medium
+                             {dndOsActive && !dndActive
+                               ? 'text-amber-500 dark:text-amber-400'  /* OS on but app didn't set it */
+                               : 'text-muted-foreground/35'}">
+                  {#if dndOsActive && !dndActive}
+                    ⚠ System Focus active (set externally)
+                  {:else}
+                    System: {dndOsActive ? "ON" : "OFF"}
+                  {/if}
+                </span>
+              {/if}
+            </div>
           </div>
         {/if}
 

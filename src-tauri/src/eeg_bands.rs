@@ -394,13 +394,17 @@ impl BandAnalyzer {
         fired
     }
 
-    /// Clear all buffers.  Called on disconnect so the next session starts fresh.
+    /// Clear all internal state, resetting the analyser to its initial
+    /// condition as if `new()` had just been called.
+    #[allow(dead_code)]
     pub fn reset(&mut self) {
         for ch in 0..EEG_CHANNELS {
             self.window[ch].clear();
             self.queued[ch].clear();
         }
         self.latest = None;
+        self.alpha_baseline = 0.0;
+        self.snapshot_count = 0;
     }
 
     // ── Core ─────────────────────────────────────────────────────────────────

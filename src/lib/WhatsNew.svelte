@@ -141,7 +141,7 @@ the Free Software Foundation, version 3 only. -->
           <div class="flex items-center justify-center w-10 h-10 rounded-xl shrink-0
                       bg-gradient-to-br from-violet-500 to-blue-600
                       shadow-lg shadow-violet-500/30 dark:shadow-violet-500/40">
-            <span class="text-lg leading-none select-none" aria-hidden>✨</span>
+            <span class="text-lg leading-none select-none" aria-hidden="true">✨</span>
           </div>
           <div class="flex flex-col gap-0.5">
             <span class="text-[0.9rem] font-bold leading-tight text-foreground">

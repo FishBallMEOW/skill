@@ -125,8 +125,9 @@ export const DC_BETA = 0.005;
 export const SMOOTH_K = 9;
 
 /** EWMA time-constant for the write-head display position (ms).
- *  Smooths out the 48 ms burst jitter from the Muse BLE protocol. */
-export const WP_TAU_MS = 200;
+ *  Must be large enough to smooth 48 ms BLE packet bursts (Muse), but small
+ *  enough that the display feels live.  80 ms ≈ 2× the burst interval. */
+export const WP_TAU_MS = 80;
 
 // ── BandChart canvas layout ───────────────────────────────────────────────────
 

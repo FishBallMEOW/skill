@@ -56,11 +56,17 @@ pub struct GpuStats {
     pub free_memory_bytes: Option<u64>,
 }
 
-/// Read current GPU statistics.
-/// Returns `None` on non-macOS, or if IOKit fails / reports no accelerators.
+/// Return smoothed GPU statistics from the background sampler.
+///
+/// The sampler polls IOKit every 100 ms and applies an EWMA (τ = 500 ms) so
+/// that brief render bursts are visible rather than lost between polls.
+/// The first call initialises the poller thread; subsequent calls just clone
+/// from a shared cache — no IOKit work on the caller's thread.
+///
+/// Returns `None` on non-macOS or if IOKit reports no accelerators yet.
 pub fn read() -> Option<GpuStats> {
     #[cfg(target_os = "macos")]
-    return macos::read();
+    return macos::cached_read();
     #[cfg(not(target_os = "macos"))]
     return None;
 }
@@ -86,6 +92,7 @@ mod macos {
     const K_IO_MASTER_PORT_DEFAULT:  u32          = 0;
     const CF_NUMBER_SI32_TYPE:       CFNumberType = 3;   // kCFNumberSInt32Type
     const CF_NUMBER_SI64_TYPE:       CFNumberType = 4;   // kCFNumberSInt64Type
+    const CF_NUMBER_FLOAT64_TYPE:    CFNumberType = 6;   // kCFNumberFloat64Type
     const K_CF_STRING_ENCODING_UTF8: u32          = 0x0800_0100;
 
     // ── IOKit framework ───────────────────────────────────────────────────
@@ -281,6 +288,53 @@ mod macos {
         })
     }
 
+    /// Read a CFNumber as a 64-bit float.
+    ///
+    /// CFNumberGetValue's third argument is declared `void *` in C; we pass a
+    /// `*mut f64` cast to `*mut i64` (both are 8-byte pointers — the cast is
+    /// safe because we immediately re-interpret through the float pointer).
+    fn dict_f64(dict: CFDictionaryRef, key: &str) -> Option<f64> {
+        with_cf_str(key, |k| {
+            let v = unsafe { CFDictionaryGetValue(dict, k) };
+            if v.is_null() { return None; }
+            let mut out: f64 = 0.0;
+            // kCFNumberFloat64Type converts from any stored numeric type.
+            if unsafe {
+                CFNumberGetValue(
+                    v,
+                    CF_NUMBER_FLOAT64_TYPE,
+                    &mut out as *mut f64 as *mut i64,
+                )
+            } {
+                Some(out)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Read a GPU utilisation percentage stored as **either**:
+    ///
+    /// * An integer 0–100  (`kCFNumberSInt32Type` / `kCFNumberSInt64Type`) —
+    ///   the format used through macOS 12 (Monterey).
+    /// * A float 0.0–1.0   (`kCFNumberFloat64Type`) — the format used from
+    ///   macOS 13 (Ventura) onwards on Apple Silicon.
+    /// * A float 0.0–100.0 (`kCFNumberFloat64Type`) — seen on some Intel
+    ///   discrete-GPU drivers.
+    ///
+    /// Returns a normalised 0.0–1.0 fraction, or `None` if the key is absent.
+    fn dict_pct(dict: CFDictionaryRef, key: &str) -> Option<f32> {
+        // Try float first — if the stored type is already a float this is the
+        // only path that returns the correct value; the integer path would
+        // truncate 0.73 → 0.
+        if let Some(f) = dict_f64(dict, key) {
+            // Values > 1.0 are percentage-style (0–100); ≤ 1.0 are fractional.
+            return Some(if f > 1.0 { (f / 100.0) as f32 } else { f as f32 });
+        }
+        // Fallback: integer percentage (pre-Ventura IOKit / Intel discrete GPU).
+        dict_i64(dict, key).map(|i| i.clamp(0, 100) as f32 / 100.0)
+    }
+
     // ── IOAccelerator loop ────────────────────────────────────────────────
 
     struct AcceleratorInfo {
@@ -326,15 +380,12 @@ mod macos {
                 if !perf.is_null() {
                     let d = perf as CFDictionaryRef;
 
-                    let render = dict_i64(d, "Renderer Utilization %");
-                    let tiler  = dict_i64(d, "Tiler Utilization %");
-                    let device = dict_i64(d, "Device Utilization %")
-                        .or_else(|| dict_i64(d, "GPU Activity(%)"));
-
-                    let render_f  = render.unwrap_or(0).clamp(0, 100) as f32 / 100.0;
-                    let tiler_f   = tiler.unwrap_or(0).clamp(0, 100) as f32 / 100.0;
-                    let overall_f = device
-                        .map(|d| d.clamp(0, 100) as f32 / 100.0)
+                    // dict_pct handles both the pre-Ventura integer (0–100)
+                    // and the post-Ventura float (0.0–1.0) storage formats.
+                    let render_f  = dict_pct(d, "Renderer Utilization %").unwrap_or(0.0);
+                    let tiler_f   = dict_pct(d, "Tiler Utilization %").unwrap_or(0.0);
+                    let overall_f = dict_pct(d, "Device Utilization %")
+                        .or_else(|| dict_pct(d, "GPU Activity(%)"))
                         .unwrap_or_else(|| (render_f + tiler_f) / 2.0);
 
                     let vram_free = dict_i64(d, "vramFreeBytes")
@@ -361,9 +412,80 @@ mod macos {
         results
     }
 
-    // ── Public entry point ────────────────────────────────────────────────
+    // ── Background sampler + EWMA cache ──────────────────────────────────
 
-    pub fn read() -> Option<super::GpuStats> {
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    /// Shared cache updated by the background poll thread.
+    static GPU_CACHE: OnceLock<Arc<Mutex<Option<super::GpuStats>>>> = OnceLock::new();
+
+    /// EWMA poll interval (ms).
+    const POLL_MS: u64 = 100;
+    /// EWMA time constant (ms).  τ = 500 ms → responds to a 200 ms spike in ~600 ms.
+    const EWMA_TAU_MS: f32 = 500.0;
+    /// Pre-computed EWMA alpha = 1 − e^(−Δt/τ).
+    const EWMA_ALPHA: f32 = 1.0 - {
+        // const-eval approximation of 1 − exp(−0.2):
+        // Use the series 1 − (1 − x + x²/2 − x³/6) = x − x²/2 + x³/6
+        // where x = POLL_MS / EWMA_TAU_MS = 0.2.
+        let x: f32 = POLL_MS as f32 / EWMA_TAU_MS;
+        1.0 - x + x * x / 2.0 - x * x * x / 6.0
+    };
+
+    fn ensure_poller() -> Arc<Mutex<Option<super::GpuStats>>> {
+        GPU_CACHE.get_or_init(|| {
+            let cache: Arc<Mutex<Option<super::GpuStats>>> = Arc::new(Mutex::new(None));
+            let shared = cache.clone();
+
+            std::thread::Builder::new()
+                .name("gpu-sampler".into())
+                .spawn(move || {
+                    // Exponentially-weighted moving-average state per metric.
+                    let mut ewma_render:  Option<f32> = None;
+                    let mut ewma_tiler:   Option<f32> = None;
+                    let mut ewma_overall: Option<f32> = None;
+
+                    loop {
+                        if let Some(raw) = raw_read() {
+                            let alpha = EWMA_ALPHA;
+
+                            let r = *ewma_render.get_or_insert(raw.render);
+                            let t = *ewma_tiler.get_or_insert(raw.tiler);
+                            let o = *ewma_overall.get_or_insert(raw.overall);
+
+                            ewma_render  = Some(r + alpha * (raw.render  - r));
+                            ewma_tiler   = Some(t + alpha * (raw.tiler   - t));
+                            ewma_overall = Some(o + alpha * (raw.overall - o));
+
+                            let smoothed = super::GpuStats {
+                                render:  ewma_render.unwrap(),
+                                tiler:   ewma_tiler.unwrap(),
+                                overall: ewma_overall.unwrap(),
+                                ..raw
+                            };
+                            *shared.lock().unwrap_or_else(|e| e.into_inner()) = Some(smoothed);
+                        }
+
+                        std::thread::sleep(std::time::Duration::from_millis(POLL_MS));
+                    }
+                })
+                .expect("gpu-sampler thread spawn");
+
+            cache
+        }).clone()
+    }
+
+    /// Return the latest smoothed GPU stats from the shared cache.
+    pub fn cached_read() -> Option<super::GpuStats> {
+        ensure_poller()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    // ── Instantaneous read (used only by the background poller) ──────────
+
+    fn raw_read() -> Option<super::GpuStats> {
         let accs = read_accelerators();
 
         // Pick the most active accelerator (highest overall utilisation).

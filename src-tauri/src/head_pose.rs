@@ -44,8 +44,6 @@ pub struct HeadPoseMetrics {
     pub pitch: f64,
     /// Roll angle in degrees.  Positive = tilting right ear down.
     pub roll: f64,
-    /// Yaw rate in °/s (gyro-only, no absolute heading).
-    pub yaw_rate: f64,
     /// Stillness score 0–100.  100 = perfectly still, 0 = vigorous movement.
     pub stillness: f64,
     /// Total nod count since connection.
@@ -61,8 +59,6 @@ pub struct HeadPoseTracker {
     roll: f64,
     /// Accumulated yaw from gyro integration (degrees, drifts over time).
     yaw: f64,
-    /// Latest gyro readings for yaw rate.
-    yaw_rate: f64,
     /// Smoothed angular velocity magnitude for stillness.
     ang_vel_ema: f64,
     /// Initialised flag (first sample seeds from accel).
@@ -87,7 +83,6 @@ impl HeadPoseTracker {
             pitch: 0.0,
             roll: 0.0,
             yaw: 0.0,
-            yaw_rate: 0.0,
             ang_vel_ema: 0.0,
             initialised: false,
             pitch_history: std::collections::VecDeque::with_capacity(hist_len),
@@ -126,7 +121,6 @@ impl HeadPoseTracker {
         let gyro_pitch = self.pitch + gx * dt;
         let gyro_roll  = self.roll  + gy * dt;
         self.yaw      += gz * dt;
-        self.yaw_rate  = gz;
 
         // Complementary filter: fuse gyro (short-term) with accel (long-term).
         self.pitch = ALPHA * gyro_pitch + (1.0 - ALPHA) * accel_pitch;
@@ -190,15 +184,10 @@ impl HeadPoseTracker {
         HeadPoseMetrics {
             pitch: (self.pitch * 10.0).round() / 10.0,
             roll:  (self.roll * 10.0).round() / 10.0,
-            yaw_rate: (self.yaw_rate * 10.0).round() / 10.0,
             stillness: stillness.round(),
             nod_count: self.nod_count,
             shake_count: self.shake_count,
         }
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::new();
     }
 }
 
@@ -257,27 +246,13 @@ mod tests {
     }
 
     #[test]
-    fn zero_gyro_at_rest_has_zero_yaw_rate() {
+    fn zero_gyro_at_rest_has_zero_yaw() {
         let mut t = HeadPoseTracker::new();
         for _ in 0..50 {
             t.update([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]);
         }
-        assert_eq!(t.metrics().yaw_rate, 0.0);
-    }
-
-    #[test]
-    fn reset_clears_all_state() {
-        let mut t = HeadPoseTracker::new();
-        for _ in 0..100 {
-            t.update([0.0, 0.0, 1.0], [0.0, 0.0, 0.0]);
-        }
-        t.reset();
-        // After reset the tracker is uninitialised: pitch/roll/stillness reset to initial.
-        let m = t.metrics();
-        assert_eq!(m.pitch, 0.0);
-        assert_eq!(m.roll,  0.0);
-        assert_eq!(m.nod_count,   0);
-        assert_eq!(m.shake_count, 0);
+        // With no gyro input the integrated yaw stays at 0.
+        assert_eq!(t.yaw, 0.0);
     }
 
     #[test]

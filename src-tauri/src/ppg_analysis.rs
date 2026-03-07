@@ -92,6 +92,14 @@ impl PpgAnalyzer {
         }
     }
 
+    /// Clear all internal buffers, resetting the analyser to its initial state.
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.ir_buf.clear();
+        self.red_buf.clear();
+        self.amb_buf.clear();
+    }
+
     /// Compute metrics from the current buffer, then drain the epoch's worth of
     /// samples.  Returns `None` if insufficient data.
     pub fn compute_epoch(&mut self, epoch_samples: usize) -> Option<PpgMetrics> {
@@ -146,12 +154,6 @@ impl PpgAnalyzer {
         })
     }
 
-    /// Clear all buffers (e.g. on disconnect).
-    pub fn reset(&mut self) {
-        self.ir_buf.clear();
-        self.red_buf.clear();
-        self.amb_buf.clear();
-    }
 }
 
 // ── Peak detection ────────────────────────────────────────────────────────────

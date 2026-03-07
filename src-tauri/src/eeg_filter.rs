@@ -341,6 +341,13 @@ impl EegFilter {
         fired
     }
 
+    /// Returns the number of pending filtered samples for `channel`.
+    #[allow(dead_code)]
+    pub fn pending_len(&self, channel: usize) -> usize {
+        if channel >= EEG_CHANNELS { return 0; }
+        self.pending[channel].len()
+    }
+
     /// Drain all pending filtered µV samples for `channel` as `f64`.
     ///
     /// Call immediately after [`push`][Self::push] returns `true`.
@@ -349,11 +356,6 @@ impl EegFilter {
             .drain(..)
             .map(|v| v as f64)
             .collect()
-    }
-
-    /// Number of filtered samples waiting in the queue for `channel`.
-    pub fn pending_len(&self, channel: usize) -> usize {
-        self.pending[channel].len()
     }
 
     /// Replace the filter configuration.

@@ -850,10 +850,6 @@ impl EegAccumulator {
         skill_log!(self.logger, "embedder", "overlap set to {clamped:.2} s → hop={} samples", self.hop_samples);
     }
 
-    pub fn overlap_secs(&self) -> f32 {
-        EMBEDDING_EPOCH_SAMPLES.saturating_sub(self.hop_samples) as f32 / MUSE_SAMPLE_RATE
-    }
-
     /// Accumulate PPG samples for `channel` (0=ambient, 1=infrared, 2=red).
     /// These are averaged over the epoch window and stored alongside EEG embeddings.
     pub fn push_ppg(&mut self, channel: usize, samples: &[f64]) {
@@ -951,14 +947,6 @@ impl EegAccumulator {
         self.latest_ppg.as_ref()
     }
 
-    /// Clear buffers and counters on disconnect.
-    pub fn reset(&mut self) {
-        for b in &mut self.bufs { b.clear(); }
-        self.since_last  = [0; EEG_CHANNELS];
-        self.latest_bands = None;
-        self.ppg_analyzer.reset();
-        self.latest_ppg = None;
-    }
 }
 
 // ── Background worker ─────────────────────────────────────────────────────────

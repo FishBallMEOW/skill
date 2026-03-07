@@ -1485,9 +1485,9 @@ pub fn dnd_status(app: &AppHandle) -> Result<Value, String> {
     let avg_score     = if sample_count > 0 {
         guard.dnd_focus_samples.iter().sum::<f64>() / sample_count as f64
     } else { 0.0 };
+    // Use the cached OS state kept fresh by the 5-second background poll.
+    let os_active     = guard.dnd_os_active;
     drop(guard);
-
-    let os_active = crate::dnd::query_os_active();
 
     Ok(serde_json::json!({
         "enabled":          enabled,
