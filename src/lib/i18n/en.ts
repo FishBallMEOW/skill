@@ -393,6 +393,11 @@ const en: Record<string, string> = {
   "updates.autostart":                 "Launch at Login",
   "updates.autostartDesc":             "Start automatically when you log in to your computer.",
   "updates.footer":                    "Updates are downloaded and installed automatically. You just need to restart.",
+
+  // ── What's New dialog ────────────────────────────────────────────────────
+  "whatsNew.title":   "What's New",
+  "whatsNew.version": "Version {version}",
+  "whatsNew.gotIt":   "Got it",
   "settings.eegEmbedding":            "EEG Embedding",
   "settings.epochOverlap":            "Epoch Overlap",
   "settings.everyNSecs":              "every {n} s",

@@ -1485,6 +1485,11 @@ const fr: Record<string, string> = {
   "updates.autostartDesc":             "Démarre automatiquement quand vous ouvrez une session.",
   "updates.autoCheckDesc":             "Vérifier les mises à jour une fois par jour au démarrage de l'application.",
   "updates.footer":                    "Les mises à jour sont téléchargées et installées automatiquement. Vous n'avez qu'à redémarrer.",
+
+  // ── What's New dialog ────────────────────────────────────────────────────
+  "whatsNew.title":   "Nouveautés",
+  "whatsNew.version": "Version {version}",
+  "whatsNew.gotIt":   "Compris",
   "settings.shortcutTheme":           "Basculer le thème",
   "settings.shortcutFocusTimer":      "Minuteur de concentration",
   "helpRef.ossTitle":      "Open-Source Projects",

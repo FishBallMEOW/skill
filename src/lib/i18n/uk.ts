@@ -1484,6 +1484,11 @@ const uk: Record<string, string> = {
   "updates.autostartDesc":             "Запускається автоматично при вході в систему.",
   "updates.autoCheckDesc":             "Перевіряти оновлення раз на день під час запуску застосунку.",
   "updates.footer":                    "Оновлення завантажуються і встановлюються автоматично. Вам просто потрібно перезапустити.",
+
+  // ── What's New dialog ────────────────────────────────────────────────────
+  "whatsNew.title":   "Що нового",
+  "whatsNew.version": "Версія {version}",
+  "whatsNew.gotIt":   "Зрозуміло",
   "settings.shortcutTheme":           "Перемикнути тему",
   "settings.shortcutFocusTimer":      "Таймер фокусу",
   "helpRef.ossTitle":      "Проєкти з відкритим кодом",

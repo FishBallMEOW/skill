@@ -25,6 +25,7 @@ the Free Software Foundation, version 3 only. -->
   import { addToast, type ToastLevel } from "$lib/toast-store.svelte";
   import KeyboardShortcuts from "$lib/KeyboardShortcuts.svelte";
   import CommandPalette    from "$lib/CommandPalette.svelte";
+  import WhatsNew          from "$lib/WhatsNew.svelte";
 
   let { children }: { children: Snippet } = $props();
 
@@ -54,6 +55,7 @@ the Free Software Foundation, version 3 only. -->
 <ToastContainer />
 <KeyboardShortcuts />
 <CommandPalette />
+<WhatsNew />
 <div id="main-content">
   {@render children()}
 </div>

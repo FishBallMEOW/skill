@@ -1490,6 +1490,11 @@ const de: Record<string, string> = {
   "updates.autostartDesc":             "Startet automatisch, wenn du dich an deinem Computer anmeldest.",
   "updates.autoCheckDesc":             "Nach Updates prüfen, sobald die App startet, einmal pro Tag.",
   "updates.footer":                    "Updates werden heruntergeladen und automatisch installiert. Sie müssen lediglich neu starten.",
+
+  // ── What's New dialog ────────────────────────────────────────────────────
+  "whatsNew.title":   "Was ist neu",
+  "whatsNew.version": "Version {version}",
+  "whatsNew.gotIt":   "Verstanden",
   "settings.shortcutTheme":           "Theme umschalten",
   "settings.shortcutFocusTimer":      "Fokus-Timer",
   "helpRef.ossTitle":      "Open-Source-Projekte",

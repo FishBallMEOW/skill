@@ -1485,6 +1485,11 @@ const he: Record<string, string> = {
   "updates.autostartDesc":             "מתחיל אוטומטית כשנכנסים למחשב.",
   "updates.autoCheckDesc":             "בדוק עדכונים פעם ביום כאשר האפליקציה מתחילה.",
   "updates.footer":                    "העדכונים מתקבלים ומותקנים אוטומטית. רק צריך להאתחל.",
+
+  // ── What's New dialog ────────────────────────────────────────────────────
+  "whatsNew.title":   "מה חדש",
+  "whatsNew.version": "גרסה {version}",
+  "whatsNew.gotIt":   "הבנתי",
   "settings.shortcutTheme":           "החלף נושא",
   "settings.shortcutFocusTimer":      "טיימר מיקוד",
   "helpRef.ossTitle":      "פרויקטים קוד פתוח",
