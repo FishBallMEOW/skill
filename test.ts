@@ -39,6 +39,8 @@
  *       GET  /calibrations/:id
  *       PATCH /calibrations/:id
  *       DELETE /calibrations/:id
+ *       GET  /dnd             → dnd status (config + live eligibility + OS state)
+ *       POST /dnd             → dnd_set (force enable/disable)
  *
  *   • HTTP UNIVERSAL TUNNEL — POST / with { "command": "…", …params }
  *     behaves identically to the WebSocket protocol.
@@ -82,9 +84,10 @@
  * 12. TIMER              — Open focus-timer window and auto-start work phase
  * 13. UMAP               — Enqueue a 3D dimensionality reduction job
  * 14. UMAP_POLL          — Poll for UMAP job completion
- * 15. UNKNOWN            — Verify error handling for bad commands
- * 16. BROADCASTS         — Listen for server-pushed real-time events
- * 17. HTTP API           — REST endpoints + universal tunnel on the same port
+ * 15. DND                — Do Not Disturb status (dnd) + force override (dnd_set); GET/POST /dnd
+ * 16. UNKNOWN            — Verify error handling for bad commands
+ * 17. BROADCASTS         — Listen for server-pushed real-time events
+ * 18. HTTP API           — REST endpoints + universal tunnel on the same port
  *
  * ═══════════════════════════════════════════════════════════════════════════════
  * USAGE
@@ -1788,6 +1791,222 @@ async function testUmap(): Promise<void> {
 // 14. UNKNOWN COMMAND
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DND (DO NOT DISTURB) AUTOMATION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Two commands:
+//
+//   dnd      — read-only status snapshot (no parameters)
+//   dnd_set  — force-override DND on or off { "enabled": bool }
+//
+// REST equivalents:
+//   GET  /dnd               → dnd
+//   POST /dnd { enabled }   → dnd_set
+//
+// The `dnd` response includes:
+//   enabled          — whether the automation feature is turned on in settings
+//   threshold        — focus score (0–100) that must be sustained
+//   duration_secs    — seconds the score must stay above threshold
+//   mode_identifier  — macOS Focus mode identifier string
+//   elapsed_secs     — seconds focus has been continuously above threshold (0 when below)
+//   dnd_active       — whether the APP has activated DND (may differ from OS state)
+//   os_active        — whether the OS currently reports Focus/DND as on (null on non-macOS)
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function testDnd(): Promise<void> {
+  heading("DND (Do Not Disturb)");
+
+  // ── dnd — status snapshot ────────────────────────────────────────────────
+  heading("dnd — status");
+  info("Request: { command: 'dnd' }");
+  info("Returns the full DND automation config + live eligibility state + OS query.");
+  info("No parameters required — purely a read operation.");
+  try {
+    const r = await send({ command: "dnd" });
+    r.ok ? ok("dnd status command succeeded") : fail(`ok=${r.ok}, error=${r.error}`);
+
+    field("enabled",         r.enabled,         "feature enabled in settings (bool)");
+    field("avg_score",       r.avg_score,       "rolling average focus score over the current window (0–100)");
+    field("threshold",       r.threshold,       "avg_score must reach this to activate DND (0–100)");
+    field("sample_count",    r.sample_count,    "samples currently in the window");
+    field("window_size",     r.window_size,     "target window size in samples (≈ duration_secs × 4 Hz)");
+    field("duration_secs",   r.duration_secs,   "seconds worth of samples that define the rolling window");
+    field("mode_identifier", r.mode_identifier, "macOS Focus mode identifier string");
+    field("dnd_active",      r.dnd_active,      "whether the APP has activated DND");
+    field("os_active",       r.os_active,       "real OS Focus state (null on non-macOS)");
+    info("dnd-eligibility broadcast (emitted ~4 Hz via WsBroadcaster + Tauri IPC):");
+    info("  focus_score  — raw per-tick score");
+    info("  avg_score    — rolling average over window_size samples — what triggers DND");
+    info("  sample_count — samples collected so far (ramps up from 0 at connect)");
+
+    // Structural validation
+    if (typeof r.enabled        !== "boolean") { fail("enabled is not a boolean"); }
+    else if (typeof r.avg_score      !== "number")  { fail("avg_score is not a number"); }
+    else if (typeof r.threshold      !== "number")  { fail("threshold is not a number"); }
+    else if (typeof r.sample_count   !== "number")  { fail("sample_count is not a number"); }
+    else if (typeof r.window_size    !== "number")  { fail("window_size is not a number"); }
+    else if (typeof r.duration_secs  !== "number")  { fail("duration_secs is not a number"); }
+    else if (typeof r.mode_identifier !== "string") { fail("mode_identifier is not a string"); }
+    else if (typeof r.dnd_active     !== "boolean") { fail("dnd_active is not a boolean"); }
+    else if (r.os_active !== null && typeof r.os_active !== "boolean") { fail("os_active must be bool or null"); }
+    else { ok("all dnd status fields have correct types"); }
+
+    // Sanity checks
+    if (r.threshold >= 0 && r.threshold <= 100) { ok(`threshold in valid range: ${r.threshold}`); }
+    else { fail(`threshold out of range: ${r.threshold}`); }
+    if (r.avg_score >= 0 && r.avg_score <= 100) { ok(`avg_score in valid range: ${r.avg_score.toFixed(1)}`); }
+    else { fail(`avg_score out of range: ${r.avg_score}`); }
+    if (r.window_size >= 8) { ok(`window_size ≥ 8: ${r.window_size}`); }
+    else { fail(`window_size too small: ${r.window_size}`); }
+    if (r.duration_secs > 0) { ok(`duration_secs positive: ${r.duration_secs}`); }
+    else { fail(`duration_secs must be > 0, got: ${r.duration_secs}`); }
+  } catch (e: any) { fail(`dnd status failed: ${e.message}`); }
+
+  // ── dnd_set — force disable (safe to call any time) ─────────────────────
+  heading("dnd_set — force disable");
+  info("Request: { command: 'dnd_set', enabled: false }");
+  info("Forces DND off immediately, bypassing the EEG threshold.");
+  info("Always safe to call — if DND was already off this is a no-op at the OS level.");
+  try {
+    const r = await send({ command: "dnd_set", enabled: false });
+    r.ok       ? ok("dnd_set enabled=false succeeded") : fail(`ok=${r.ok}, error=${r.error}`);
+    r.enabled === false ? ok("response echoes enabled=false") : fail(`enabled=${r.enabled}`);
+    field("ok",      r.ok,      "true if OS call succeeded (or was a no-op)");
+    field("enabled", r.enabled, "echoes the requested state");
+  } catch (e: any) { fail(`dnd_set disable failed: ${e.message}`); }
+
+  // Verify the state was applied
+  try {
+    const r = await send({ command: "dnd" });
+    r.dnd_active === false
+      ? ok("confirmed: dnd_active=false after force-disable")
+      : fail(`dnd_active is ${r.dnd_active} after force-disable`);
+  } catch (e: any) { fail(`dnd status re-check failed: ${e.message}`); }
+
+  // ── dnd_set — force enable ───────────────────────────────────────────────
+  heading("dnd_set — force enable");
+  info("Request: { command: 'dnd_set', enabled: true }");
+  info("Forces DND on immediately. On macOS this activates the configured Focus mode.");
+  info("On non-macOS platforms the OS call is a no-op but ok=true is returned.");
+  try {
+    const r = await send({ command: "dnd_set", enabled: true });
+    // ok=true means the OS call succeeded; ok=false means it failed (e.g. no macOS)
+    if (r.ok) {
+      ok("dnd_set enabled=true succeeded (OS call ok)");
+      field("ok",      r.ok,      "OS call succeeded");
+      field("enabled", r.enabled, "echoes the requested state");
+    } else {
+      // On non-macOS or without permissions, the OS call may legitimately fail.
+      ok(`dnd_set enabled=true returned ok=${r.ok} (expected on non-macOS or missing permissions)`);
+    }
+    r.enabled === true ? ok("response echoes enabled=true") : fail(`enabled=${r.enabled}`);
+  } catch (e: any) { fail(`dnd_set enable failed: ${e.message}`); }
+
+  // Always clean up by disabling DND so tests don't leave the user in DND
+  try {
+    await send({ command: "dnd_set", enabled: false });
+    ok("cleanup: DND disabled after enable test");
+  } catch (e: any) { fail(`cleanup disable failed: ${e.message}`); }
+
+  // ── dnd_set — missing enabled field → error ──────────────────────────────
+  heading("dnd_set — validation");
+  info("Request: { command: 'dnd_set' } (missing enabled) → should return ok=false");
+  try {
+    const r = await send({ command: "dnd_set" });
+    r.ok === false
+      ? ok(`correctly rejected missing enabled: error="${r.error}"`)
+      : fail("expected ok=false when enabled field is missing");
+  } catch (e: any) { fail(`missing-enabled test failed: ${e.message}`); }
+
+  info("Request: { command: 'dnd_set', enabled: 'yes' } (wrong type) → should return ok=false");
+  try {
+    const r = await send({ command: "dnd_set", enabled: "yes" });
+    r.ok === false
+      ? ok(`correctly rejected non-boolean enabled: error="${r.error}"`)
+      : fail("expected ok=false for non-boolean enabled");
+  } catch (e: any) { fail(`non-boolean enabled test failed: ${e.message}`); }
+
+  // ── HTTP REST: GET /dnd ───────────────────────────────────────────────────
+  heading("HTTP REST — GET /dnd");
+  info("GET /dnd → DND status snapshot (same as { command: 'dnd' } via WS)");
+  try {
+    const res  = await fetch(`${httpBase}/dnd`);
+    const data = await res.json() as any;
+    res.status === 200 ? ok("GET /dnd → 200") : fail(`expected 200, got ${res.status}`);
+    data?.ok === true  ? ok("GET /dnd → ok=true") : fail(`ok=${data?.ok}, error=${data?.error}`);
+    data?.command === "dnd" ? ok("command field echoed: 'dnd'") : fail(`command=${data?.command}`);
+    typeof data?.enabled      === "boolean" ? ok("enabled field present (boolean)") : fail(`enabled=${data?.enabled}`);
+    typeof data?.threshold    === "number"  ? ok("threshold field present (number)") : fail(`threshold=${data?.threshold}`);
+    typeof data?.dnd_active   === "boolean" ? ok("dnd_active field present (boolean)") : fail(`dnd_active=${data?.dnd_active}`);
+    field("enabled",      data?.enabled,      "");
+    field("threshold",    data?.threshold,    "");
+    field("elapsed_secs", data?.elapsed_secs, "");
+    field("dnd_active",   data?.dnd_active,   "");
+    field("os_active",    data?.os_active,    "");
+  } catch (e: any) { fail(`GET /dnd failed: ${e.message}`); }
+
+  // ── HTTP REST: POST /dnd { enabled: false } ───────────────────────────────
+  heading("HTTP REST — POST /dnd disable");
+  info("POST /dnd { enabled: false } → force-disable DND via REST");
+  try {
+    const res = await fetch(`${httpBase}/dnd`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ enabled: false }),
+    });
+    const data = await res.json() as any;
+    res.status === 200  ? ok("POST /dnd (disable) → 200") : fail(`expected 200, got ${res.status}`);
+    data?.ok === true   ? ok("POST /dnd (disable) → ok=true") : fail(`ok=${data?.ok}, error=${data?.error}`);
+    data?.command === "dnd_set" ? ok("command='dnd_set'") : fail(`command=${data?.command}`);
+    data?.enabled === false ? ok("enabled=false in response") : fail(`enabled=${data?.enabled}`);
+  } catch (e: any) { fail(`POST /dnd disable failed: ${e.message}`); }
+
+  // ── HTTP REST: POST /dnd missing enabled → 400 ───────────────────────────
+  heading("HTTP REST — POST /dnd validation");
+  info("POST /dnd {} (missing enabled) → 400");
+  try {
+    const res = await fetch(`${httpBase}/dnd`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({}),
+    });
+    res.status === 400 ? ok("POST /dnd (no enabled) → 400") : fail(`expected 400, got ${res.status}`);
+    const data = await res.json() as any;
+    data?.ok === false  ? ok("ok=false in error response") : fail(`ok=${data?.ok}`);
+    typeof data?.error === "string" ? ok(`error message: "${data.error}"`) : fail("no error field");
+  } catch (e: any) { fail(`POST /dnd missing-enabled test failed: ${e.message}`); }
+
+  // ── Universal tunnel: dnd via POST / ─────────────────────────────────────
+  heading("Universal tunnel — dnd");
+  info("POST / { command: 'dnd' } → status via HTTP tunnel");
+  try {
+    const res = await fetch(`${httpBase}/`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ command: "dnd" }),
+    });
+    const data = await res.json() as any;
+    res.status === 200 && data?.ok === true
+      ? ok(`tunnel dnd → ok=true, enabled=${data.enabled}, dnd_active=${data.dnd_active}`)
+      : fail(`tunnel dnd failed: status=${res.status} ok=${data?.ok}`);
+  } catch (e: any) { fail(`tunnel dnd test failed: ${e.message}`); }
+
+  info("POST / { command: 'dnd_set', enabled: false } → disable via tunnel");
+  try {
+    const res = await fetch(`${httpBase}/`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ command: "dnd_set", enabled: false }),
+    });
+    const data = await res.json() as any;
+    res.status === 200 && data?.ok === true
+      ? ok(`tunnel dnd_set → ok=true, enabled=${data.enabled}`)
+      : fail(`tunnel dnd_set failed: status=${res.status} ok=${data?.ok}`);
+  } catch (e: any) { fail(`tunnel dnd_set test failed: ${e.message}`); }
+}
+
 async function testUnknownCommand(): Promise<void> {
   heading("unknown command");
   info("Request: { command: 'nonexistent_command_xyz' }");
@@ -2113,6 +2332,7 @@ async function main(): Promise<void> {
   await testCompare();
   await testSleep();
   await testUmap();
+  await testDnd();
   await testUnknownCommand();
   await testBroadcastEvents();   // skips gracefully when transport === "http"
   await testHttp(port);          // always runs — tests HTTP layer directly

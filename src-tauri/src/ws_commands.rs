@@ -1442,6 +1442,109 @@ pub fn interactive_search(app: &AppHandle, msg: &Value) -> Result<Value, String>
     }))
 }
 
+// ── dnd ───────────────────────────────────────────────────────────────────────
+
+/// `dnd` — return the current Do Not Disturb automation status.
+///
+/// **Response**
+/// ```json
+/// {
+///   "enabled":         true,
+///   "avg_score":       68.4,
+///   "threshold":       60.0,
+///   "sample_count":    120,
+///   "window_size":     240,
+///   "duration_secs":   60,
+///   "mode_identifier": "com.apple.donotdisturb.mode.default",
+///   "dnd_active":      false,
+///   "os_active":       false
+/// }
+/// ```
+///
+/// | Field | Description |
+/// |---|---|
+/// | `enabled` | Whether DND automation is enabled in settings |
+/// | `avg_score` | Rolling average focus score over the current sample window |
+/// | `threshold` | Average must reach this (0–100) to activate DND |
+/// | `sample_count` | Samples currently in the window |
+/// | `window_size` | Target window size (≈ duration_secs × 4 Hz) |
+/// | `duration_secs` | Seconds worth of samples in the rolling window |
+/// | `mode_identifier` | macOS Focus mode identifier (ignored on non-macOS) |
+/// | `dnd_active` | Whether the app has currently activated DND |
+/// | `os_active` | Real OS Focus state (`null` on non-macOS) |
+pub fn dnd_status(app: &AppHandle) -> Result<Value, String> {
+    let s = app.state::<Mutex<AppState>>();
+    let guard = s.lock_or_recover();
+    let enabled       = guard.dnd_config.enabled;
+    let threshold     = guard.dnd_config.focus_threshold;
+    let duration_secs = guard.dnd_config.duration_secs;
+    let mode_id       = guard.dnd_config.focus_mode_identifier.clone();
+    let dnd_active    = guard.dnd_active;
+    let window_size   = (duration_secs as usize * 4).max(8);
+    let sample_count  = guard.dnd_focus_samples.len();
+    let avg_score     = if sample_count > 0 {
+        guard.dnd_focus_samples.iter().sum::<f64>() / sample_count as f64
+    } else { 0.0 };
+    drop(guard);
+
+    let os_active = crate::dnd::query_os_active();
+
+    Ok(serde_json::json!({
+        "enabled":          enabled,
+        "avg_score":        avg_score,
+        "threshold":        threshold,
+        "sample_count":     sample_count,
+        "window_size":      window_size,
+        "duration_secs":    duration_secs,
+        "mode_identifier":  mode_id,
+        "dnd_active":       dnd_active,
+        "os_active":        os_active,
+    }))
+}
+
+/// `dnd_set { "enabled": bool }` — force-enable or disable DND immediately,
+/// bypassing the EEG threshold entirely.
+///
+/// Useful for automation scripts, integrations, or testing.  The change is
+/// reflected in `dnd_active` and a `dnd-state-changed` event is emitted to all
+/// connected clients (including the desktop UI) so they can update their state.
+///
+/// **Required**
+/// - `enabled` — `true` to activate DND, `false` to deactivate.
+///
+/// **Response**
+/// ```json
+/// { "enabled": true, "ok": true }
+/// ```
+///
+/// When the OS call fails (e.g. macOS permissions not granted), `ok` is
+/// `false` and no state change is applied.
+pub fn dnd_set(app: &AppHandle, msg: &Value) -> Result<Value, String> {
+    let enabled = msg.get("enabled")
+        .and_then(|v| v.as_bool())
+        .ok_or_else(|| "missing required field: \"enabled\" (boolean)".to_string())?;
+
+    let mode_id = {
+        let s = app.state::<Mutex<AppState>>();
+        let g = s.lock_or_recover();
+        g.dnd_config.focus_mode_identifier.clone()
+    };
+
+    let ok = crate::dnd::set_dnd(enabled, &mode_id);
+    if ok {
+        let s = app.state::<Mutex<AppState>>();
+        let mut guard = s.lock_or_recover();
+        guard.dnd_active = enabled;
+        if !enabled {
+            guard.dnd_focus_samples.clear();
+        }
+        drop(guard);
+        let _ = app.emit("dnd-state-changed", enabled);
+    }
+
+    Ok(serde_json::json!({ "enabled": enabled, "ok": ok }))
+}
+
 // ── say ───────────────────────────────────────────────────────────────────────
 
 /// `say` — synthesise `text` via TTS and play it on the default audio output.
@@ -1518,6 +1621,8 @@ pub async fn dispatch(
         "delete_calibration"  => delete_calibration(app, msg),
         "run_calibration"     => run_calibration(app, msg).await,
         "say"                 => say(app, msg).await,
+        "dnd"                 => dnd_status(app),
+        "dnd_set"             => dnd_set(app, msg),
         other                 => Err(format!("unknown command: \"{other}\"")),
     }
 }

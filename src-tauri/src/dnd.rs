@@ -51,6 +51,33 @@ pub struct FocusModeOption {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// Query the OS directly to see whether any Focus / DND mode is currently
+/// active.
+///
+/// Unlike the `dnd_active` flag in `AppState` — which only tracks what *this
+/// app* has set — this reads `~/Library/DoNotDisturb/DB/Assertions.json`
+/// on macOS 12+ (or runs `defaults read` on older releases) to get the true
+/// OS-level state.  This lets the app detect when DND was activated by another
+/// app or by the user manually, and also recover from a previous crash where
+/// `dnd_active` was left `false` even though the OS still had DND on.
+///
+/// Returns `Some(true/false)` on macOS, `None` on non-macOS platforms.
+pub fn query_os_active() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        use macos_focus::FocusManager;
+        match FocusManager::new() {
+            Ok(mgr) => match mgr.is_active() {
+                Ok(v)  => Some(v),
+                Err(e) => { eprintln!("[dnd] query_os_active failed: {e}"); None }
+            },
+            Err(e) => { eprintln!("[dnd] query_os_active init failed: {e}"); None }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
+}
+
 /// Enable or disable a Focus mode by its `modeIdentifier` string.
 ///
 /// `mode_identifier` is only used when `enabled` is `true`; the `disable`

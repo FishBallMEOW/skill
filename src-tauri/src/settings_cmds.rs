@@ -766,7 +766,7 @@ pub fn set_dnd_config(
         let mut s = state.lock_or_recover();
         let active = s.dnd_active;
         s.dnd_config          = config.clone();
-        s.focus_above_since   = None; // reset timer on any config change
+        s.dnd_focus_samples.clear(); // reset rolling window on any config change
         if !config.enabled && s.dnd_active {
             s.dnd_active = false;
         }
@@ -780,6 +780,52 @@ pub fn set_dnd_config(
     }
 
     crate::save_settings(&app);
+}
+
+/// Live snapshot of the Do Not Disturb automation pipeline.
+///
+/// Returned by [`get_dnd_status`] and mirrored by the `dnd-eligibility`
+/// broadcast event (emitted ~4 Hz).
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct DndStatus {
+    /// Whether the DND automation feature is enabled in settings.
+    pub enabled: bool,
+    /// Rolling-average focus score over the current sample window (0–100).
+    /// The live per-tick value is only available via the `dnd-eligibility` event.
+    pub avg_score: f64,
+    /// Score (0–100) that the rolling average must reach to activate DND.
+    pub threshold: f64,
+    /// Number of samples currently in the rolling window.
+    pub sample_count: usize,
+    /// Target window size in samples (≈ duration_secs × 4 Hz).
+    pub window_size: usize,
+    /// Duration (seconds) that defines the rolling window length.
+    pub duration_secs: u32,
+    /// Whether the app has currently activated DND.
+    pub dnd_active: bool,
+    /// Whether the OS reports DND / Focus as active right now (`null` on non-macOS).
+    pub os_active: Option<bool>,
+}
+
+/// Return a snapshot of the DND automation pipeline state.
+#[tauri::command]
+pub fn get_dnd_status(state: tauri::State<'_, Mutex<AppState>>) -> DndStatus {
+    let s            = state.lock_or_recover();
+    let enabled      = s.dnd_config.enabled;
+    let threshold    = s.dnd_config.focus_threshold as f64;
+    let duration_secs = s.dnd_config.duration_secs;
+    let window_size  = (duration_secs as usize * 4).max(8);
+    let sample_count = s.dnd_focus_samples.len();
+    let avg_score    = if sample_count > 0 {
+        s.dnd_focus_samples.iter().sum::<f64>() / sample_count as f64
+    } else { 0.0 };
+    let dnd_active   = s.dnd_active;
+    drop(s);
+    DndStatus {
+        enabled, avg_score, threshold, sample_count, window_size,
+        duration_secs, dnd_active,
+        os_active: crate::dnd::query_os_active(),
+    }
 }
 
 /// Open a native file-picker dialog and return the selected WAV file path.

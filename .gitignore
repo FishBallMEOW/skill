@@ -17,3 +17,6 @@ src-tauri/keys/.env.keys
 # do not include weights
 **/*.gguf
 **/*.safetensors
+
+rust_out
+TODO.md

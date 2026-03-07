@@ -28,9 +28,11 @@
 //!
 //! | Event            | Rate      | Description                                        |
 //! |------------------|-----------|----------------------------------------------------|
-//! | `eeg-bands`      | ~4 Hz     | Derived scores, band powers, HR, head pose (60+ fields) |
-//! | `muse-status`    | ~1 Hz     | Device heartbeat: battery, sample counts, state    |
-//! | `label-created`  | on-demand | Fired when any client creates a label              |
+//! | `eeg-bands`        | ~4 Hz     | Derived scores, band powers, HR, head pose (60+ fields) |
+//! | `muse-status`      | ~1 Hz     | Device heartbeat: battery, sample counts, state    |
+//! | `label-created`    | on-demand | Fired when any client creates a label              |
+//! | `dnd-eligibility`  | ~4 Hz     | DND pipeline state: focus_score, smoothed_score, threshold, elapsed_secs, duration_secs, dnd_active |
+//! | `dnd-state-changed`| on-demand | Fired when DND is activated or deactivated (payload: bool) |
 //!
 //! **Note:** Raw EEG samples (256 Hz), PPG (64 Hz), IMU (50 Hz), and
 //! spectrogram slices are *not* broadcast over the WebSocket API — their
@@ -75,6 +77,8 @@
 //! | `run_calibration` | `id` (string, optional profile UUID)                    | Open calibration window and start the profile immediately |
 //! | `timer`           | _(none)_                                                | Open the focus-timer window and auto-start the work phase |
 //! | `say`             | `text` (string, required), `voice` (string, optional)   | Speak text via on-device TTS (fire-and-forget; responds immediately) |
+//! | `dnd`             | _(none)_                                                | DND automation status: config, timer progress, app-active, OS-active |
+//! | `dnd_set`         | `enabled` (bool, required)                              | Force-enable or disable DND immediately, bypassing the EEG threshold |
 //! | `label`           | `text` (string, required); `context` (string, optional) | Submit a label for the current EEG window |
 //! | `search_labels`        | `query` (string); `k`, `ef` (optional u64); `mode`: `"text"\|"context"\|"both"` (default `"text"`) | Search labels by free text |
 //! | `interactive_search`   | `query` (string); `k_text`, `k_eeg`, `k_labels`, `reach_minutes` (optional u64) | Cross-modal 4-layer graph search (query→labels→EEG→found labels); returns `nodes`, `edges`, `dot` |

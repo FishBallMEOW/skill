@@ -117,6 +117,7 @@ pub fn router(state: SharedState) -> Router {
             get(get_calibration_get)
             .patch(update_calibration_patch)
             .delete(delete_calibration_delete))
+        .route("/dnd",            get(dnd_get).post(dnd_post))
         // ── CORS: allow all origins so browsers / notebooks can call freely
         .layer(CorsLayer::new()
             .allow_origin(Any)
@@ -211,7 +212,8 @@ async fn root_get(
                 "umap","umap_poll",
                 "list_calibrations","get_calibration",
                 "create_calibration","update_calibration","delete_calibration",
-                "run_calibration"
+                "run_calibration",
+                "dnd","dnd_set"
             ],
             "rest": {
                 "GET /status":             "status snapshot",
@@ -231,7 +233,9 @@ async fn root_get(
                 "POST /calibrations":      "create profile",
                 "GET  /calibrations/{id}":  "get profile",
                 "PATCH /calibrations/{id}": "update profile",
-                "DELETE /calibrations/{id}":"delete profile"
+                "DELETE /calibrations/{id}":"delete profile",
+                "GET  /dnd":              "DND automation status (config + live eligibility)",
+                "POST /dnd":              "force-enable/disable DND: { \"enabled\": bool }"
             }
         });
         (StatusCode::OK, Json(info)).into_response()
@@ -379,6 +383,31 @@ async fn update_calibration_patch(
     let mut msg = merge(json!({}), body);
     msg["id"] = id.into();
     cmd(&s, &peer_str(addr), "update_calibration", msg).await
+}
+
+/// `GET /dnd` — return the full DND automation status snapshot.
+///
+/// Equivalent to `{ "command": "dnd" }` via WebSocket or the universal tunnel.
+/// Returns config (enabled, threshold, duration, mode), live timer progress
+/// (`elapsed_secs`), app-side `dnd_active`, and the real OS Focus state.
+async fn dnd_get(
+    State(s): State<SharedState>, addr: ConnectInfo<SocketAddr>,
+) -> Response {
+    cmd(&s, &peer_str(addr), "dnd", json!({})).await
+}
+
+/// `POST /dnd` — force-enable or disable DND, bypassing the EEG threshold.
+///
+/// Body: `{ "enabled": true | false }` — required.
+///
+/// Equivalent to `{ "command": "dnd_set", "enabled": true }` via WebSocket.
+/// Useful for automation scripts, shell scripts, and CI/CD pipelines that need
+/// to control Focus mode without waiting for the EEG threshold to be met.
+async fn dnd_post(
+    State(s): State<SharedState>, addr: ConnectInfo<SocketAddr>,
+    body: Option<Json<Value>>,
+) -> Response {
+    cmd(&s, &peer_str(addr), "dnd_set", merge(json!({}), body)).await
 }
 
 async fn delete_calibration_delete(

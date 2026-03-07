@@ -163,7 +163,7 @@ use settings_cmds::{
     get_last_input_activity,
     get_recent_active_windows, get_recent_input_activity,
     get_input_buckets,
-    get_dnd_config, set_dnd_config, get_dnd_active, test_dnd, list_focus_modes,
+    get_dnd_config, set_dnd_config, get_dnd_active, get_dnd_status, test_dnd, list_focus_modes,
 };
 
 use std::{
@@ -539,10 +539,11 @@ pub struct AppState {
     /// Tracked so we can cleanly deactivate it when focus drops.
     pub dnd_active: bool,
 
-    /// Monotonic instant when the focus score first exceeded the configured
-    /// threshold in the current sustained-focus window.  `None` when focus is
-    /// below threshold.
-    pub focus_above_since: Option<std::time::Instant>,
+    /// Rolling window of raw focus scores used to compute the average for DND
+    /// activation.  Capped at `duration_secs × ~4 Hz` samples.  When the
+    /// average of all samples in the window exceeds `focus_threshold`, DND is
+    /// activated; when it drops below, DND is deactivated.
+    pub dnd_focus_samples: std::collections::VecDeque<f64>,
 }
 
 impl Default for AppState {
@@ -652,7 +653,7 @@ impl Default for AppState {
             session_start_utc: None,
             dnd_config:          DoNotDisturbConfig::default(),
             dnd_active:          false,
-            focus_above_since:   None,
+            dnd_focus_samples:   std::collections::VecDeque::new(),
         }
     }
 }
@@ -2752,44 +2753,63 @@ async fn handle_event(
                 {
                     let sr = app.state::<Mutex<AppState>>();
                     let mut s = sr.lock_or_recover();
-                    if s.dnd_config.enabled {
-                        let threshold = s.dnd_config.focus_threshold as f64;
-                        let duration  = s.dnd_config.duration_secs as u64;
-                        let now       = std::time::Instant::now();
 
-                        if focus_score >= threshold {
-                            // Focus is high — start or continue the timer.
-                            let above_since = s.focus_above_since.get_or_insert(now);
-                            let elapsed = now.duration_since(*above_since).as_secs();
-                            if !s.dnd_active && elapsed >= duration {
-                                // Threshold met — activate Focus mode.
+                    let dnd_enabled   = s.dnd_config.enabled;
+                    let threshold     = s.dnd_config.focus_threshold as f64;
+                    let duration_secs = s.dnd_config.duration_secs;
+
+                    // Window = duration_secs × ~4 Hz ticks, minimum 8 samples.
+                    let window = (duration_secs as usize * 4).max(8);
+                    s.dnd_focus_samples.push_back(focus_score);
+                    while s.dnd_focus_samples.len() > window {
+                        s.dnd_focus_samples.pop_front();
+                    }
+                    let sample_count = s.dnd_focus_samples.len();
+                    let avg_score = s.dnd_focus_samples.iter().sum::<f64>()
+                        / sample_count as f64;
+
+                    let mut emit_active = s.dnd_active;
+
+                    if dnd_enabled {
+                        if avg_score >= threshold {
+                            if !s.dnd_active {
                                 let mode_id = s.dnd_config.focus_mode_identifier.clone();
-                                drop(s); // release lock before blocking syscall
+                                drop(s);
                                 let ok = dnd::set_dnd(true, &mode_id);
                                 if ok {
                                     let mut s2 = sr.lock_or_recover();
                                     s2.dnd_active = true;
+                                    drop(s2);
+                                    emit_active = true;
                                     let _ = app.emit("dnd-state-changed", true);
                                 }
                             }
-                        } else {
-                            // Focus dropped below threshold — reset timer.
-                            s.focus_above_since = None;
-                            if s.dnd_active {
-                                s.dnd_active = false;
-                                drop(s);
-                                dnd::set_dnd(false, "");
-                                let _ = app.emit("dnd-state-changed", false);
-                            }
+                        } else if s.dnd_active {
+                            s.dnd_active = false;
+                            emit_active  = false;
+                            drop(s);
+                            dnd::set_dnd(false, "");
+                            let _ = app.emit("dnd-state-changed", false);
                         }
                     } else if s.dnd_active {
-                        // Feature was disabled while DND was on — clean up.
-                        s.dnd_active        = false;
-                        s.focus_above_since = None;
+                        s.dnd_active = false;
+                        emit_active  = false;
                         drop(s);
                         dnd::set_dnd(false, "");
                         let _ = app.emit("dnd-state-changed", false);
                     }
+
+                    let eligibility = serde_json::json!({
+                        "enabled":      dnd_enabled,
+                        "focus_score":  focus_score,
+                        "avg_score":    avg_score,
+                        "sample_count": sample_count,
+                        "window_size":  window,
+                        "threshold":    threshold,
+                        "dnd_active":   emit_active,
+                    });
+                    let _ = app.emit("dnd-eligibility", &eligibility);
+                    app.state::<WsBroadcaster>().send("dnd-eligibility", &eligibility);
                 }
                 // ── End Auto Do Not Disturb ────────────────────────────────
 
@@ -5537,6 +5557,19 @@ pub fn run() {
                     .store(data.track_input_activity, std::sync::atomic::Ordering::Relaxed);
                 // Restore Do Not Disturb automation config.
                 s.dnd_config = data.do_not_disturb;
+                // Reconcile dnd_active with the real OS state.  If the app
+                // crashed while DND was on, dnd_active is false but the OS
+                // might still have Focus mode set — clear it so the user is
+                // not silently stuck in DND.  Conversely, if the user turned
+                // DND on manually, we don't own it and leave it alone.
+                if let Some(os_active) = crate::dnd::query_os_active() {
+                    if !os_active {
+                        // OS already cleared: mirror that.
+                        s.dnd_active = false;
+                    }
+                    // If os_active == true but dnd_active == false, the user
+                    // enabled DND themselves; we don't touch it.
+                }
                 neutts_apply_config(&data.neutts);
                 // Seed discovered list from paired
 
@@ -5956,7 +5989,7 @@ pub fn run() {
             get_last_input_activity,
             get_recent_active_windows, get_recent_input_activity,
             get_input_buckets,
-            get_dnd_config, set_dnd_config, get_dnd_active, test_dnd, list_focus_modes,
+            get_dnd_config, set_dnd_config, get_dnd_active, get_dnd_status, test_dnd, list_focus_modes,
             tts_unload, tts_get_voice, tts_list_neutts_voices,
             connect_openbci,
             open_api_window,

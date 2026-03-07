@@ -30,6 +30,9 @@ const CLI_VERSION = "1.1.0";
  *   timer                          Open focus-timer window and start work phase immediately
  *   umap                           3D UMAP projection with live progress bar
  *   listen                         Stream broadcast events for N seconds
+ *   dnd                            Show DND automation status (config + live eligibility + OS state)
+ *   dnd on                         Force-enable DND immediately (bypass EEG threshold)
+ *   dnd off                        Force-disable DND immediately
  *   raw '{"command":"..."}'        Send arbitrary JSON, print full response
  *
  * Transport selection (default: try WebSocket, fall back to HTTP):
@@ -680,6 +683,9 @@ function parseArgs(): Args {
     else if (args.command === "notify"        && !args.text)    { args.text    = a; }
     else if (args.command === "notify"        && !args.body)    { args.body    = a; }
     else if (args.command === "raw"           && !args.rawJson) { args.rawJson = a; }
+    else if (args.command === "dnd" && !args.subAction && (a === "on" || a === "off")) {
+      args.subAction = a; // "on" or "off" → maps to dnd_set { enabled: true/false }
+    }
     else if (args.command === "calibrations"  && !args.subAction) {
       // calibrations [list|get] [<id>]
       args.subAction = a.toLowerCase();
@@ -733,6 +739,7 @@ ${m("calibrations [list|get <id>]",                  "list calibration profiles 
 ${m("calibrate [--profile <name-or-id>]",            "open calibration window and start profile immediately")}
 ${m("timer",                                         "open focus-timer window and start work phase immediately")}
 ${m("umap [--a-start .. --a-end .. --b-start .. --b-end ..]", "3D UMAP projection (waits for result)")}
+${m("dnd [on|off]",                                    "show DND automation status; 'on'/'off' force-overrides immediately")}
 ${m("listen [--seconds <n>]",                        "listen for broadcast events (default: 5s)")}
 ${m("raw '{\"command\":\"status\"}'",                "send raw JSON, print full response")}
 
@@ -955,6 +962,19 @@ ${BOLD}EXAMPLES${RESET}
   ${DIM}#   { "status": "complete", "result": {${RESET}
   ${DIM}#     "points": [{ "x": 1.23, "y": -0.45, "z": 2.01, "session": "A", "utc": 1740380105 }, ...],${RESET}
   ${DIM}#     "n_a": 513, "n_b": 541, "dim": 3, "elapsed_ms": 8432 } }${RESET}
+
+  ${BOLD}dnd${RESET} — Do Not Disturb automation status and control
+  ${DIM}$${RESET} npx tsx cli.ts dnd                                 ${DIM}# show config + live eligibility state${RESET}
+  ${DIM}$${RESET} npx tsx cli.ts dnd on                              ${DIM}# force-enable DND (bypass EEG threshold)${RESET}
+  ${DIM}$${RESET} npx tsx cli.ts dnd off                             ${DIM}# force-disable DND${RESET}
+  ${DIM}$${RESET} npx tsx cli.ts dnd --json                          ${DIM}# raw JSON (pipe to jq)${RESET}
+  ${DIM}# Output (dnd):${RESET}
+  ${DIM}#   DND automation  enabled=false  threshold=60  duration=60s${RESET}
+  ${DIM}#   focus timer     elapsed=0s / 60s required${RESET}
+  ${DIM}#   app active      false${RESET}
+  ${DIM}#   OS active       false  (macOS Assertions.json)${RESET}
+  ${DIM}# Output (dnd on):${RESET}
+  ${DIM}#   DND activated  ok=true${RESET}
 
   ${BOLD}listen${RESET} — stream live broadcast events
   ${DIM}$${RESET} npx tsx cli.ts listen                              ${DIM}# 5 seconds${RESET}
@@ -2838,6 +2858,136 @@ function progressBar(pct: number, width: number): string {
 }
 
 /**
+ * `dnd [on|off]` — Show DND automation status, or force-override it.
+ *
+ * With no subcommand, sends `{ command: "dnd" }` and prints the full status
+ * snapshot: config (enabled, threshold, duration, mode), live timer state
+ * (elapsed_secs toward duration_secs), and the real OS-level Focus state.
+ *
+ * With `on` or `off`, sends `{ command: "dnd_set", enabled: true/false }` to
+ * activate or deactivate DND immediately, bypassing the EEG threshold.
+ *
+ * **HTTP equivalents**
+ * ```sh
+ * # Status
+ * curl http://localhost:PORT/dnd
+ *
+ * # Force on
+ * curl -X POST http://localhost:PORT/dnd \
+ *      -H 'Content-Type: application/json' \
+ *      -d '{"enabled":true}'
+ *
+ * # Force off
+ * curl -X POST http://localhost:PORT/dnd \
+ *      -H 'Content-Type: application/json' \
+ *      -d '{"enabled":false}'
+ * ```
+ *
+ * @param args - Parsed CLI args; `subAction` is `"on"`, `"off"`, or undefined.
+ */
+async function cmdDnd(args: Args): Promise<void> {
+  const sub = args.subAction; // "on" | "off" | undefined
+
+  if (sub === "on" || sub === "off") {
+    // ── Force-override ──────────────────────────────────────────────────────
+    const enabled = sub === "on";
+    print(`${BOLD}⚡ dnd ${enabled ? "on" : "off"}${RESET}`);
+    print(`  ${DIM}force-${enabled ? "enabling" : "disabling"} DND (bypasses EEG threshold)${RESET}`);
+
+    const r = await send({ command: "dnd_set", enabled });
+    if (!r.ok) printError(`dnd_set failed: ${r.error ?? "OS call returned false"}`);
+
+    if (jsonMode) {
+      printResult(r);
+    } else {
+      const status = r.ok
+        ? `${GREEN}activated${RESET}`
+        : `${RED}failed (OS call rejected — check macOS Focus permissions)${RESET}`;
+      print(`  DND ${enabled ? "enabled" : "disabled"}  ${status}`);
+      printResult(r);
+    }
+    return;
+  }
+
+  // ── Status snapshot ─────────────────────────────────────────────────────
+  print(`${BOLD}⚡ dnd${RESET}  ${DIM}automation status${RESET}`);
+
+  const r = await send({ command: "dnd" });
+  if (!r.ok) printError(`dnd failed: ${r.error}`);
+
+  if (jsonMode) {
+    printResult(r);
+    return;
+  }
+
+  // Human-readable summary
+  const yn = (v: boolean | null | undefined) =>
+    v === true  ? `${GREEN}yes${RESET}` :
+    v === false ? `${RED}no${RESET}`   :
+    `${DIM}n/a (non-macOS)${RESET}`;
+
+  // Score bar: show both raw and smoothed side-by-side
+  const scoreBar = (raw: number, smoothed: number, threshold: number) => {
+    const pct  = Math.min(smoothed / 100, 1.0);
+    const fill = Math.round(pct * 20);
+    const empty = 20 - fill;
+    const bar  = `${smoothed >= threshold ? GREEN : YELLOW}${"█".repeat(fill)}${RESET}${DIM}${"░".repeat(empty)}${RESET}`;
+    const mark = Math.round((threshold / 100) * 20);
+    return `${bar}  smoothed ${smoothed.toFixed(1)}  ${DIM}(raw ${raw.toFixed(1)}, threshold ${threshold} @ col ${mark})${RESET}`;
+  };
+
+  const timerBar = (elapsed: number, total: number) => {
+    const pct  = total > 0 ? Math.min(elapsed / total, 1.0) : 0;
+    const fill = Math.round(pct * 20);
+    const empty = 20 - fill;
+    return `${GREEN}${"█".repeat(fill)}${RESET}${DIM}${"░".repeat(empty)}${RESET} ${elapsed}s / ${total}s`;
+  };
+
+  const raw      = typeof r.focus_score    === "number" ? r.focus_score    : 0;
+  const smoothed = typeof r.smoothed_score === "number" ? r.smoothed_score : raw;
+
+  print("");
+  print(`  ${CYAN}DND automation${RESET}`);
+  print(`    enabled        ${yn(r.enabled)}${r.enabled ? "" : `  ${DIM}(turn on in Settings → Do Not Disturb)${RESET}`}`);
+  print(`    threshold      ${CYAN}${r.threshold}${RESET}  ${DIM}focus score (0–100) required to start timer${RESET}`);
+  print(`    duration       ${CYAN}${r.duration_secs}s${RESET}  ${DIM}must stay above threshold this long before DND activates${RESET}`);
+  print(`    mode           ${DIM}${r.mode_identifier}${RESET}`);
+  print("");
+  print(`  ${CYAN}Focus score${RESET}  ${DIM}(EMA α=0.08, τ≈3s — brief dips don't reset timer)${RESET}`);
+  print(`    ${scoreBar(raw, smoothed, r.threshold)}`);
+  print("");
+  print(`  ${CYAN}Sustained-focus timer${RESET}  ${DIM}(starts when smoothed_score ≥ threshold)${RESET}`);
+  print(`    ${timerBar(r.elapsed_secs, r.duration_secs)}`);
+  if (r.elapsed_secs >= r.duration_secs && r.duration_secs > 0) {
+    print(`    ${GREEN}▶ threshold sustained — DND should be active${RESET}`);
+  } else if (r.elapsed_secs > 0) {
+    const remaining = r.duration_secs - r.elapsed_secs;
+    print(`    ${YELLOW}▷ ${remaining}s more needed  (score has been above threshold for ${r.elapsed_secs}s)${RESET}`);
+  } else {
+    print(`    ${DIM}▷ timer not running — smoothed score (${smoothed.toFixed(1)}) below threshold (${r.threshold})${RESET}`);
+  }
+  print("");
+  print(`  ${CYAN}State${RESET}`);
+  print(`    app activated  ${yn(r.dnd_active)}  ${DIM}(this app set DND)${RESET}`);
+  print(`    OS active      ${yn(r.os_active)}  ${DIM}(macOS Assertions.json / defaults read)${RESET}`);
+
+  if (r.dnd_active !== r.os_active && r.os_active !== null) {
+    print(`    ${YELLOW}⚠ app and OS states differ — OS may have been changed manually${RESET}`);
+  }
+  if (!r.enabled && r.os_active) {
+    print(`    ${YELLOW}⚠ DND is on but automation is disabled — disable manually or turn automation on${RESET}`);
+  }
+
+  print("");
+  print(`  ${DIM}Tips:${RESET}`);
+  print(`    ${DIM}• 'dnd on'  — force-enable immediately without waiting for EEG threshold${RESET}`);
+  print(`    ${DIM}• 'dnd off' — force-disable immediately${RESET}`);
+  print(`    ${DIM}• 'listen'  — streams 'dnd-eligibility' events live (focus_score, smoothed_score, elapsed_secs)${RESET}`);
+
+  printResult(r);
+}
+
+/**
  * `listen` — Passively listen for broadcast events from the Skill server.
  *
  * Opens a WebSocket and collects all broadcast events (EEG packets, PPG,
@@ -3021,6 +3171,9 @@ async function main(): Promise<void> {
         break;
       case "timer":
         await cmdTimer();
+        break;
+      case "dnd":
+        await cmdDnd(args);
         break;
       case "label":
         if (!args.text) printError("usage: cli.ts label \"your annotation text\"");
